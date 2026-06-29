@@ -1,0 +1,4 @@
+.infobase/
+/infobase
+*.test
+coverage.out

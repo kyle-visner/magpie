@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 
 	"infobase/internal/infobase"
@@ -35,6 +34,9 @@ func run(args []string, out io.Writer) error {
 	}
 	rest := global.Args()
 	if len(rest) == 0 {
+		return usage(out)
+	}
+	if rest[0] == "help" || rest[0] == "--help" || rest[0] == "-h" {
 		return usage(out)
 	}
 	store, err := infobase.OpenStore(*storeDir)
@@ -81,8 +83,6 @@ func run(args []string, out io.Writer) error {
 		return a.importData(rest[1:], out)
 	case "snapshot":
 		return a.snapshot(rest[1:], out)
-	case "help", "--help", "-h":
-		return usage(out)
 	default:
 		return fmt.Errorf("unknown command %q", rest[0])
 	}
@@ -381,8 +381,4 @@ func readJSONFile(path string, into any) error {
 		r = f
 	}
 	return json.NewDecoder(r).Decode(into)
-}
-
-func parseAmountCents(s string) (int64, error) {
-	return strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 }
