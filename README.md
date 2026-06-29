@@ -2,38 +2,217 @@
 
 InfoBase is a Phase 1 Go implementation of the PRD in `InfoBase_Requirements.md`.
 
-## What Is Implemented
+It is built around one rule: agents and humans use the same CLI, and the CLI enforces RBAC, ledger invariants, encryption, immutable history, and auditability before data is written.
 
-- Canonical CLI in `cmd/infobase`.
-- Custom Merkle-DAG-style storage with immutable SHA-256-addressed JSON nodes.
+## Current Capabilities
+
+- Canonical local CLI in `cmd/infobase`.
+- Custom immutable Merkle-DAG-style storage with SHA-256-addressed JSON nodes.
 - AES-256-GCM encryption for stored node payloads.
 - Unified RBAC for ledger, notes, imports, snapshots, and audit reads.
-- Double-entry ledger with hard validation of balanced journal entries.
+- Double-entry ledger validation before persistence.
 - Markdown note create, update, list, and get operations.
 - QuickBooks CSV import with idempotency keys and balanced ledger mapping.
 - Named snapshots for recoverable roots.
+- JSON command output by default for agent consumption.
 - Automated tests for business invariants and CLI behavior.
 
-## Quick Start
+## Build And Verify
+
+From the repository root:
 
 ```sh
 go test ./...
-go run ./cmd/infobase --store .infobase init
-go run ./cmd/infobase --store .infobase ledger account create --name Checking --type asset
-go run ./cmd/infobase --store .infobase note put --title "Ops Handoff" --body "Ship daily closeout."
+go build -o ./infobase ./cmd/infobase
 ```
 
-All command output is JSON by default for agent consumption.
+If your environment blocks the default Go build cache, use a writable cache:
 
-## Security Model
+```sh
+GOCACHE=/private/tmp/infobase-gocache go test ./...
+GOCACHE=/private/tmp/infobase-gocache go build -o ./infobase ./cmd/infobase
+```
 
-The CLI is the only supported interaction path. Business operations call the same storage and RBAC layer used by tests, so ledger invariants and permissions cannot be bypassed through alternate query surfaces.
+The generated `./infobase` binary is ignored by Git.
 
-Payloads are encrypted at rest with AES-256-GCM. By default, a local 32-byte data key is generated at `.infobase/keys/data.key` with restrictive file permissions. Production deployments should provide `INFOBASE_DATA_KEY` from a managed secret store or KMS and keep local key files out of backups.
+## Agent Integration Pattern
 
-The implementation is intentionally local-only in Phase 1, so there is no network listener and no transport surface. If an API server is added later, TLS, authn, request logging, and rate limiting should be required before handling sensitive data.
+Give your agent a fixed command template and tell it to parse stdout as JSON:
 
-## QuickBooks CSV Format
+```sh
+/Users/kylevisner/dev/infobase/infobase \
+  --store /Users/kylevisner/dev/infobase/.infobase \
+  --actor AGENT_USER_ID \
+  COMMAND...
+```
+
+For development without building first, use:
+
+```sh
+go run ./cmd/infobase \
+  --store /Users/kylevisner/dev/infobase/.infobase \
+  --actor AGENT_USER_ID \
+  COMMAND...
+```
+
+Operational rules for agents:
+
+- Treat stdout as the only success channel.
+- Treat stderr as JSON error output.
+- Never edit `.infobase/` files directly.
+- Never invent raw storage mutations.
+- Use `ledger account list` before creating journal entries so account IDs are exact.
+- Use `note put --body-file FILE` for long note bodies to avoid shell quoting issues.
+- Create a `snapshot create --name NAME` before bulk imports or large agent workflows.
+
+Errors look like:
+
+```json
+{"code":"permission_denied","message":"role \"Operations\" lacks ledger:read"}
+```
+
+## First-Time Setup
+
+Initialize a local store:
+
+```sh
+./infobase --store .infobase init
+```
+
+The default initialized actor is `owner` with the `Owner` role.
+
+List supported permissions:
+
+```sh
+./infobase --store .infobase --actor owner rbac permissions
+```
+
+Create an agent user with a constrained role:
+
+```sh
+./infobase --store .infobase --actor owner rbac user set \
+  --id ops-agent \
+  --role Operations
+```
+
+Built-in roles:
+
+- `Owner`: full Phase 1 access.
+- `Admin`: broad operational access except recovery.
+- `Accountant`: ledger, notes read, QuickBooks import, and audit read.
+- `Operations`: notes read/write only.
+- `Sales Rep`: notes read/write only.
+
+To define a custom role:
+
+```sh
+./infobase --store .infobase --actor owner rbac role set \
+  --name "Notes Agent" \
+  --permissions notes:read,notes:write
+```
+
+Then assign it:
+
+```sh
+./infobase --store .infobase --actor owner rbac user set \
+  --id notes-agent \
+  --role "Notes Agent"
+```
+
+## Notes Workflow
+
+Create or update a note:
+
+```sh
+./infobase --store .infobase --actor notes-agent note put \
+  --title "Ops Handoff" \
+  --body "Ship daily closeout."
+```
+
+For longer content:
+
+```sh
+./infobase --store .infobase --actor notes-agent note put \
+  --title "Weekly Review" \
+  --body-file ./weekly-review.md \
+  --sensitivity internal
+```
+
+List notes:
+
+```sh
+./infobase --store .infobase --actor notes-agent note list
+```
+
+Read a specific note:
+
+```sh
+./infobase --store .infobase --actor notes-agent note get --id note:...
+```
+
+## Ledger Workflow
+
+Create accounts as an actor with `ledger:write`:
+
+```sh
+./infobase --store .infobase --actor owner ledger account create \
+  --name Checking \
+  --type asset
+
+./infobase --store .infobase --actor owner ledger account create \
+  --name "Consulting Revenue" \
+  --type revenue
+```
+
+List accounts and capture the generated account IDs:
+
+```sh
+./infobase --store .infobase --actor owner ledger account list
+```
+
+Create a balanced journal entry JSON file:
+
+```json
+{
+  "date": "2026-06-29",
+  "memo": "Invoice paid",
+  "postings": [
+    {
+      "account_id": "acct:CHECKING_ID",
+      "debit_cents": 125000
+    },
+    {
+      "account_id": "acct:REVENUE_ID",
+      "credit_cents": 125000
+    }
+  ]
+}
+```
+
+Submit it:
+
+```sh
+./infobase --store .infobase --actor owner ledger journal create \
+  --file ./journal-entry.json
+```
+
+The write is rejected unless total debits exactly equal total credits.
+
+List journal entries:
+
+```sh
+./infobase --store .infobase --actor owner ledger journal list
+```
+
+## QuickBooks CSV Import
+
+Generate the expected CSV header:
+
+```sh
+./infobase import quickbooks-template
+```
+
+CSV format:
 
 ```csv
 date,memo,account,amount_cents,source_id
@@ -41,4 +220,96 @@ date,memo,account,amount_cents,source_id
 2026-06-02,SaaS bill,acct:...,-1900,qb-2
 ```
 
-Positive amounts debit the configured cash account and credit the mapped account. Negative amounts debit the mapped account and credit cash.
+Import the file:
+
+```sh
+./infobase --store .infobase --actor owner import quickbooks-csv \
+  --file ./quickbooks.csv \
+  --cash-account acct:CHECKING_ID
+```
+
+Positive amounts debit the configured cash account and credit the mapped account. Negative amounts debit the mapped account and credit cash. `source_id` is used as an idempotency key, so re-importing the same file skips already imported rows.
+
+## Snapshots And Audit
+
+Create a named recovery point before a risky workflow:
+
+```sh
+./infobase --store .infobase --actor owner snapshot create \
+  --name before-qb-import-2026-06-29
+```
+
+Read reconstructed state:
+
+```sh
+./infobase --store .infobase --actor owner state
+```
+
+Read immutable audit nodes:
+
+```sh
+./infobase --store .infobase --actor owner audit
+```
+
+Both `state` and `audit` require `audit:read`.
+
+## Command Reference
+
+```text
+init
+state
+audit
+rbac permissions
+rbac role set --name NAME --permissions p1,p2
+rbac user set --id ID --role ROLE
+ledger account create --name NAME --type TYPE
+ledger account list
+ledger journal create --file entry.json
+ledger journal list
+note put --title TITLE --body BODY
+note put --title TITLE --body-file FILE
+note get --id ID
+note list
+import quickbooks-csv --file FILE --cash-account ACCOUNT_ID
+import quickbooks-template
+snapshot create --name NAME
+```
+
+Global flags:
+
+```text
+--store DIR        store directory, default .infobase
+--actor USER_ID    caller identity, default owner
+--role ROLE        optional role assertion; must match the actor's assigned role
+```
+
+## Storage Format
+
+The default store directory is `.infobase/`.
+
+- `.infobase/objects/nodes/`: immutable JSON node files.
+- `.infobase/refs/root`: current live root hash.
+- `.infobase/refs/named/`: named snapshot roots.
+- `.infobase/keys/data.key`: local AES-256-GCM data key when `INFOBASE_DATA_KEY` is not supplied.
+
+Business payloads are encrypted in node files as:
+
+```json
+{
+  "sealed_payload": {
+    "algorithm": "AES-256-GCM",
+    "nonce": "...",
+    "ciphertext": "..."
+  }
+}
+```
+
+## Security Notes
+
+The CLI is the only supported interaction path. Business operations call the same storage and RBAC layer used by tests, so ledger invariants and permissions are enforced before persistence.
+
+Phase 1 is local-only. There is no network listener and no transport surface.
+
+Important current limitation: authentication is not implemented yet. The CLI accepts `--actor` as caller context and checks it against stored RBAC assignments, but it does not prove the operating-system user is that actor. For now, run the binary only in trusted local automation or behind a wrapper that authenticates the caller.
+
+Production deployments should provide `INFOBASE_DATA_KEY` from a managed secret store or KMS and keep local key files out of backups.
