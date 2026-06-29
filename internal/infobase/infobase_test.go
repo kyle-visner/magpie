@@ -86,32 +86,34 @@ func TestRBACDeniesLedgerWritesButAllowsConfiguredNoteWrites(t *testing.T) {
 	}
 }
 
-func TestQuickBooksImportIsBalancedAndIdempotent(t *testing.T) {
+func TestSourceTaggedJournalEntriesAreBalancedAndIdempotent(t *testing.T) {
 	s, ctx := newTestStore(t)
 	cash := mustAccount(t, s, ctx, "Operating Bank", AccountAsset)
 	revenue := mustAccount(t, s, ctx, "Consulting Revenue", AccountRevenue)
-	expense := mustAccount(t, s, ctx, "Software Expense", AccountExpense)
-	csvPath := s.Dir() + "/quickbooks.csv"
-	data := "date,memo,account,amount_cents,source_id\n" +
-		"2026-06-01,Invoice paid," + revenue.ID + ",125000,qb-1\n" +
-		"2026-06-02,SaaS bill," + expense.ID + ",-1900,qb-2\n"
-	if err := os.WriteFile(csvPath, []byte(data), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
-	report, err := s.ImportQuickBooksCSV(ctx, csvPath, cash.ID)
+	entry := JournalEntry{
+		Date:      "2026-06-01",
+		Memo:      "Agent-mapped external export row",
+		Source:    "quickbooks_export",
+		SourceKey: "qb-1",
+		Postings: []Posting{
+			{AccountID: cash.ID, Debit: 125000},
+			{AccountID: revenue.ID, Credit: 125000},
+		},
+	}
+	created, root, err := s.CreateJournalEntry(ctx, entry)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Imported != 2 || report.Skipped != 0 {
-		t.Fatalf("unexpected first import report: %#v", report)
+	if created.Source != "quickbooks_export" || created.SourceKey != "qb-1" {
+		t.Fatalf("source metadata was not preserved: %#v", created)
 	}
 	st, err := s.LoadState()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st.JournalEntries) != 2 {
-		t.Fatalf("expected 2 journal entries, got %d", len(st.JournalEntries))
+	if len(st.JournalEntries) != 1 {
+		t.Fatalf("expected 1 journal entry, got %d", len(st.JournalEntries))
 	}
 	for _, entry := range st.JournalEntries {
 		var debit, credit int64
@@ -120,23 +122,34 @@ func TestQuickBooksImportIsBalancedAndIdempotent(t *testing.T) {
 			credit += p.Credit
 		}
 		if debit != credit {
-			t.Fatalf("import created unbalanced entry %#v", entry)
+			t.Fatalf("source-tagged workflow created unbalanced entry %#v", entry)
 		}
 	}
 
-	report, err = s.ImportQuickBooksCSV(ctx, csvPath, cash.ID)
+	createdAgain, rootAgain, err := s.CreateJournalEntry(ctx, entry)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Imported != 0 || report.Skipped != 2 {
-		t.Fatalf("expected idempotent second import, got %#v", report)
+	if createdAgain.ID != created.ID || rootAgain != root {
+		t.Fatalf("expected source-key idempotency, got entry=%s root=%s", createdAgain.ID, rootAgain)
 	}
 	st, err = s.LoadState()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st.JournalEntries) != 2 {
-		t.Fatalf("duplicate import persisted entries: %d", len(st.JournalEntries))
+	if len(st.JournalEntries) != 1 {
+		t.Fatalf("duplicate source-tagged entry persisted entries: %d", len(st.JournalEntries))
+	}
+
+	conflicting := entry
+	conflicting.Memo = "Changed external row with reused source key"
+	_, _, err = s.CreateJournalEntry(ctx, conflicting)
+	if err == nil {
+		t.Fatal("expected reused source key with different content to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrConflict {
+		t.Fatalf("expected source-key conflict, got %#v", err)
 	}
 }
 

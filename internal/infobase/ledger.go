@@ -12,7 +12,7 @@ type accountCreatePayload struct {
 
 type journalCreatePayload struct {
 	Entry     JournalEntry `json:"entry"`
-	ImportKey string       `json:"import_key,omitempty"`
+	SourceKey string       `json:"source_key,omitempty"`
 }
 
 func (s *Store) CreateAccount(ctx Context, name string, typ AccountType, sensitivity string) (Account, string, error) {
@@ -53,21 +53,16 @@ func validateAccountType(typ AccountType) error {
 }
 
 func (s *Store) CreateJournalEntry(ctx Context, entry JournalEntry) (JournalEntry, string, error) {
-	return s.createJournalEntry(ctx, entry, "")
+	return s.createJournalEntry(ctx, entry, sourceKeyForEntry(entry))
 }
 
-func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, importKey string) (JournalEntry, string, error) {
+func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey string) (JournalEntry, string, error) {
 	st, err := s.LoadState()
 	if err != nil {
 		return JournalEntry{}, "", err
 	}
 	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
 		return JournalEntry{}, "", err
-	}
-	if importKey != "" {
-		if existing, ok := st.ImportKeys[importKey]; ok {
-			return st.JournalEntries[existing], st.Root, nil
-		}
 	}
 	entry.Memo = strings.TrimSpace(entry.Memo)
 	if entry.Date == "" {
@@ -103,15 +98,46 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, importKey st
 		return JournalEntry{}, "", appErr(ErrValidation, "journal entry must balance: debit=%d credit=%d", debit, credit)
 	}
 	if entry.ID == "" {
-		entry.ID = makeID("jrnl", entry.Date, entry.Memo, postingFingerprint(entry.Postings), importKey)
+		entry.ID = makeID("jrnl", entry.Date, entry.Memo, postingFingerprint(entry.Postings), sourceKey)
+	}
+	if sourceKey != "" {
+		if existingID, ok := st.SourceKeys[sourceKey]; ok {
+			existing := st.JournalEntries[existingID]
+			if journalEquivalent(existing, entry) {
+				return existing, st.Root, nil
+			}
+			return JournalEntry{}, "", appErr(ErrConflict, "source key %q already belongs to journal entry %s", sourceKey, existingID)
+		}
 	}
 	if _, exists := st.JournalEntries[entry.ID]; exists {
 		return JournalEntry{}, "", appErr(ErrConflict, "journal entry already exists: %s", entry.ID)
 	}
 	entry.CreatedAt = s.now().UTC()
 	entry.CreatedBy = ctx.Actor
-	hash, err := s.appendEvent(ctx, "ledger.journal", entry.ID, "ledger journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, ImportKey: importKey}), true)
+	hash, err := s.appendEvent(ctx, "ledger.journal", entry.ID, "ledger journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), true)
 	return entry, hash, err
+}
+
+func sourceKeyForEntry(entry JournalEntry) string {
+	if entry.Source == "" || entry.SourceKey == "" {
+		return ""
+	}
+	return entry.Source + ":" + entry.SourceKey
+}
+
+func journalEquivalent(a, b JournalEntry) bool {
+	if a.Date != b.Date || a.Memo != b.Memo || a.Source != b.Source || a.SourceKey != b.SourceKey {
+		return false
+	}
+	if len(a.Postings) != len(b.Postings) {
+		return false
+	}
+	for i := range a.Postings {
+		if a.Postings[i] != b.Postings[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func postingFingerprint(postings []Posting) string {

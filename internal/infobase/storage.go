@@ -303,8 +303,8 @@ func (s *Store) applyNode(st *State, node Node) error {
 			return err
 		}
 		st.JournalEntries[ev.Entry.ID] = ev.Entry
-		if ev.ImportKey != "" {
-			st.ImportKeys[ev.ImportKey] = ev.Entry.ID
+		if ev.SourceKey != "" {
+			st.SourceKeys[ev.SourceKey] = ev.Entry.ID
 		}
 	case "note.upsert":
 		var ev noteUpsertPayload

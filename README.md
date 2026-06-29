@@ -9,10 +9,10 @@ It is built around one rule: agents and humans use the same CLI, and the CLI enf
 - Canonical local CLI in `cmd/infobase`.
 - Custom immutable Merkle-DAG-style storage with SHA-256-addressed JSON nodes.
 - AES-256-GCM encryption for stored node payloads.
-- Unified RBAC for ledger, notes, imports, snapshots, and audit reads.
+- Unified RBAC for ledger, notes, snapshots, and audit reads.
 - Double-entry ledger validation before persistence.
 - Markdown note create, update, list, and get operations.
-- QuickBooks CSV import with idempotency keys and balanced ledger mapping.
+- Source-tagged journal entries for agent-mapped exports from QuickBooks or other systems.
 - Named snapshots for recoverable roots.
 - JSON command output by default for agent consumption.
 - Automated tests for business invariants and CLI behavior.
@@ -63,7 +63,7 @@ Operational rules for agents:
 - Never invent raw storage mutations.
 - Use `ledger account list` before creating journal entries so account IDs are exact.
 - Use `note put --body-file FILE` for long note bodies to avoid shell quoting issues.
-- Create a `snapshot create --name NAME` before bulk imports or large agent workflows.
+- Create a `snapshot create --name NAME` before large agent workflows.
 
 Errors look like:
 
@@ -99,7 +99,7 @@ Built-in roles:
 
 - `Owner`: full Phase 1 access.
 - `Admin`: broad operational access except recovery.
-- `Accountant`: ledger, notes read, QuickBooks import, and audit read.
+- `Accountant`: ledger, notes read, and audit read.
 - `Operations`: notes read/write only.
 - `Sales Rep`: notes read/write only.
 
@@ -176,6 +176,8 @@ Create a balanced journal entry JSON file:
 {
   "date": "2026-06-29",
   "memo": "Invoice paid",
+  "source": "quickbooks_export",
+  "source_key": "qb-row-123",
   "postings": [
     {
       "account_id": "acct:CHECKING_ID",
@@ -198,37 +200,55 @@ Submit it:
 
 The write is rejected unless total debits exactly equal total credits.
 
+If `source` and `source_key` are both present, InfoBase uses them as an idempotency key. Re-submitting the same source-tagged entry returns the existing entry instead of creating a duplicate.
+
 List journal entries:
 
 ```sh
 ./infobase --store .infobase --actor owner ledger journal list
 ```
 
-## QuickBooks CSV Import
+## Agent-Mapped External Exports
 
-Generate the expected CSV header:
+InfoBase does not include a QuickBooks-specific CSV/IIF/QBXML parser in the CLI. The agent is responsible for reading exports from QuickBooks or any other external system and mapping them into InfoBase's canonical journal-entry JSON.
+
+The expected agent flow is:
+
+1. Read the external export.
+2. Use `ledger account list` to find exact InfoBase account IDs.
+3. Build balanced journal-entry JSON.
+4. Include `source` and `source_key` from the external row or transaction ID.
+5. Submit each canonical entry with `ledger journal create --file FILE`.
+
+Example agent-produced journal entry:
+
+```json
+{
+  "date": "2026-06-01",
+  "memo": "QuickBooks invoice payment INV-1001",
+  "source": "quickbooks_export",
+  "source_key": "INV-1001-payment",
+  "postings": [
+    {
+      "account_id": "acct:CHECKING_ID",
+      "debit_cents": 125000
+    },
+    {
+      "account_id": "acct:CONSULTING_REVENUE_ID",
+      "credit_cents": 125000
+    }
+  ]
+}
+```
+
+Submit it:
 
 ```sh
-./infobase import quickbooks-template
+./infobase --store .infobase --actor owner ledger journal create \
+  --file ./agent-mapped-entry.json
 ```
 
-CSV format:
-
-```csv
-date,memo,account,amount_cents,source_id
-2026-06-01,Invoice paid,acct:...,125000,qb-1
-2026-06-02,SaaS bill,acct:...,-1900,qb-2
-```
-
-Import the file:
-
-```sh
-./infobase --store .infobase --actor owner import quickbooks-csv \
-  --file ./quickbooks.csv \
-  --cash-account acct:CHECKING_ID
-```
-
-Positive amounts debit the configured cash account and credit the mapped account. Negative amounts debit the mapped account and credit cash. `source_id` is used as an idempotency key, so re-importing the same file skips already imported rows.
+This keeps InfoBase's CLI narrow and opinionated. The CLI validates permissions, account existence, double-entry balance, source-key idempotency, encryption, and immutable storage; the agent handles source-specific interpretation.
 
 ## Snapshots And Audit
 
@@ -236,7 +256,7 @@ Create a named recovery point before a risky workflow:
 
 ```sh
 ./infobase --store .infobase --actor owner snapshot create \
-  --name before-qb-import-2026-06-29
+  --name before-agent-ledger-workflow-2026-06-29
 ```
 
 Read reconstructed state:
@@ -270,8 +290,6 @@ note put --title TITLE --body BODY
 note put --title TITLE --body-file FILE
 note get --id ID
 note list
-import quickbooks-csv --file FILE --cash-account ACCOUNT_ID
-import quickbooks-template
 snapshot create --name NAME
 ```
 

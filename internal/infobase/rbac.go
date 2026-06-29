@@ -31,7 +31,7 @@ func defaultRoles() map[string]Role {
 			Name: "Owner",
 			Permissions: []Permission{
 				PermissionLedgerRead, PermissionLedgerWrite, PermissionNotesRead, PermissionNotesWrite,
-				PermissionRBACManage, PermissionImportQB, PermissionSnapshot, PermissionAuditRead,
+				PermissionRBACManage, PermissionSnapshot, PermissionAuditRead,
 				PermissionAdminRecover,
 			},
 		},
@@ -39,13 +39,13 @@ func defaultRoles() map[string]Role {
 			Name: "Admin",
 			Permissions: []Permission{
 				PermissionLedgerRead, PermissionLedgerWrite, PermissionNotesRead, PermissionNotesWrite,
-				PermissionRBACManage, PermissionImportQB, PermissionSnapshot, PermissionAuditRead,
+				PermissionRBACManage, PermissionSnapshot, PermissionAuditRead,
 			},
 		},
 		"Accountant": {
 			Name: "Accountant",
 			Permissions: []Permission{
-				PermissionLedgerRead, PermissionLedgerWrite, PermissionNotesRead, PermissionImportQB, PermissionAuditRead,
+				PermissionLedgerRead, PermissionLedgerWrite, PermissionNotesRead, PermissionAuditRead,
 			},
 		},
 		"Operations": {
@@ -130,7 +130,7 @@ func (s *Store) UpsertUser(ctx Context, user User) (string, error) {
 func PermissionNames() []string {
 	perms := []string{
 		string(PermissionLedgerRead), string(PermissionLedgerWrite), string(PermissionNotesRead),
-		string(PermissionNotesWrite), string(PermissionRBACManage), string(PermissionImportQB),
+		string(PermissionNotesWrite), string(PermissionRBACManage),
 		string(PermissionSnapshot), string(PermissionAuditRead), string(PermissionAdminRecover),
 	}
 	sort.Strings(perms)

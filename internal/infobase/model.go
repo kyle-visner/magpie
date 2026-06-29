@@ -10,7 +10,6 @@ const (
 	PermissionNotesRead    Permission = "notes:read"
 	PermissionNotesWrite   Permission = "notes:write"
 	PermissionRBACManage   Permission = "rbac:manage"
-	PermissionImportQB     Permission = "import:quickbooks"
 	PermissionSnapshot     Permission = "snapshot:create"
 	PermissionAuditRead    Permission = "audit:read"
 	PermissionAdminRecover Permission = "admin:recover"
@@ -82,7 +81,7 @@ type State struct {
 	Accounts       map[string]Account      `json:"accounts"`
 	JournalEntries map[string]JournalEntry `json:"journal_entries"`
 	Notes          map[string]Note         `json:"notes"`
-	ImportKeys     map[string]string       `json:"import_keys"`
+	SourceKeys     map[string]string       `json:"source_keys"`
 	Root           string                  `json:"root,omitempty"`
 }
 
@@ -93,7 +92,7 @@ func emptyState() State {
 		Accounts:       map[string]Account{},
 		JournalEntries: map[string]JournalEntry{},
 		Notes:          map[string]Note{},
-		ImportKeys:     map[string]string{},
+		SourceKeys:     map[string]string{},
 	}
 }
 

@@ -4,13 +4,13 @@ This document records the Phase 1 controls intended to support SOC 2, PCI DSS, a
 
 ## Implemented Controls
 
-- Least privilege RBAC is enforced before ledger, note, import, snapshot, and audit operations.
+- Least privilege RBAC is enforced before ledger, note, snapshot, and audit operations.
 - All business mutations are immutable events in content-addressed nodes.
 - Node hashes are verified on read, and tampering fails state reconstruction.
 - Node payloads are encrypted at rest with AES-256-GCM.
 - Default store directories, node files, refs, and key files use restrictive filesystem permissions.
 - Financial journal entries must balance before they can be persisted.
-- QuickBooks imports are idempotent by source key to reduce duplicate financial records.
+- Agent-mapped external journal entries are idempotent by source key to reduce duplicate financial records.
 - Audit history is reconstructed from the same immutable DAG used as source of truth.
 - The Phase 1 CLI has no SQL, graph-query, vector-query, or raw mutation escape hatch.
 

@@ -79,8 +79,6 @@ func run(args []string, out io.Writer) error {
 		return a.ledger(rest[1:], out)
 	case "note":
 		return a.note(rest[1:], out)
-	case "import":
-		return a.importData(rest[1:], out)
 	case "snapshot":
 		return a.snapshot(rest[1:], out)
 	default:
@@ -263,30 +261,6 @@ func (a app) note(args []string, out io.Writer) error {
 	}
 }
 
-func (a app) importData(args []string, out io.Writer) error {
-	if len(args) == 0 {
-		return fmt.Errorf("import command required")
-	}
-	switch args[0] {
-	case "quickbooks-csv":
-		fs := newFlagSet("import quickbooks-csv")
-		file := fs.String("file", "", "QuickBooks CSV file")
-		cash := fs.String("cash-account", "", "cash/bank account id used as counterparty")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		report, err := a.store.ImportQuickBooksCSV(a.ctx, *file, *cash)
-		if err != nil {
-			return err
-		}
-		return writeJSON(out, report)
-	case "quickbooks-template":
-		return infobase.QuickBooksCSVTemplate(out)
-	default:
-		return fmt.Errorf("unknown import command %q", args[0])
-	}
-}
-
 func (a app) snapshot(args []string, out io.Writer) error {
 	if len(args) < 1 || args[0] != "create" {
 		return fmt.Errorf("usage: snapshot create --name NAME")
@@ -320,8 +294,6 @@ Commands:
   note put --title TITLE --body BODY
   note get --id ID
   note list
-  import quickbooks-csv --file FILE --cash-account ACCOUNT_ID
-  import quickbooks-template
   snapshot create --name NAME
 
 Global flags:
