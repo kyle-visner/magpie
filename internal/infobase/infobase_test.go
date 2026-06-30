@@ -86,6 +86,111 @@ func TestRBACDeniesLedgerWritesButAllowsConfiguredNoteWrites(t *testing.T) {
 	}
 }
 
+func TestAccountExternalRefsAreStructuredAndUnique(t *testing.T) {
+	s, ctx := newTestStore(t)
+	acct, _, err := s.CreateAccountWithExternalRefs(ctx, "Mercury Checking ****1234", AccountAsset, "confidential", []ExternalSourceRef{{
+		SourceSystem: " Mercury ",
+		ExternalID:   "mercury-account-1",
+		ExternalType: "bank_account",
+		DisplayName:  "Mercury Operating Checking",
+		URL:          "https://dashboard.mercury.com/accounts/mercury-account-1",
+		Metadata: map[string]string{
+			"account_kind": "checking",
+			"nickname":     "Operating Checking",
+			"mask":         "****1234",
+			"last_four":    "1234",
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acct.ExternalRefs) != 1 {
+		t.Fatalf("expected one external ref, got %#v", acct.ExternalRefs)
+	}
+	ref := acct.ExternalRefs[0]
+	if ref.SourceSystem != "mercury" {
+		t.Fatalf("expected normalized source system, got %#v", ref)
+	}
+	if ref.ExternalID != "mercury-account-1" ||
+		ref.ExternalType != "bank_account" ||
+		ref.DisplayName != "Mercury Operating Checking" ||
+		ref.URL != "https://dashboard.mercury.com/accounts/mercury-account-1" ||
+		ref.Metadata["account_kind"] != "checking" ||
+		ref.Metadata["nickname"] != "Operating Checking" ||
+		ref.Metadata["mask"] != "****1234" ||
+		ref.Metadata["last_four"] != "1234" {
+		t.Fatalf("unexpected external ref: %#v", ref)
+	}
+
+	qbAcct, _, err := s.CreateAccountWithExternalRefs(ctx, "Sales Tax Payable", AccountLiability, "confidential", []ExternalSourceRef{{
+		SourceSystem: "quickbooks",
+		ExternalID:   "42",
+		ExternalType: "chart_account",
+		DisplayName:  "Sales Tax Payable",
+		Metadata: map[string]string{
+			"classification": "liability",
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := qbAcct.ExternalRefs[0]; got.SourceSystem != "quickbooks" || got.ExternalType != "chart_account" || got.Metadata["classification"] != "liability" {
+		t.Fatalf("unexpected non-bank external ref: %#v", got)
+	}
+
+	_, _, err = s.CreateAccountWithExternalRefs(ctx, "Duplicate Mercury Checking", AccountAsset, "confidential", []ExternalSourceRef{{
+		SourceSystem: "mercury",
+		ExternalID:   "mercury-account-1",
+	}})
+	if err == nil {
+		t.Fatal("expected duplicate external ref to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrConflict {
+		t.Fatalf("expected duplicate external ref conflict, got %#v", err)
+	}
+}
+
+func TestAccountExternalRefValidation(t *testing.T) {
+	s, ctx := newTestStore(t)
+	_, _, err := s.CreateAccountWithExternalRefs(ctx, "Invalid External Ref", AccountAsset, "confidential", []ExternalSourceRef{{
+		ExternalID: "missing-source",
+	}})
+	if err == nil {
+		t.Fatal("expected missing source system to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrValidation {
+		t.Fatalf("expected validation error, got %#v", err)
+	}
+
+	_, _, err = s.CreateAccountWithExternalRefs(ctx, "Invalid Last Four", AccountAsset, "confidential", []ExternalSourceRef{{
+		SourceSystem: "mercury",
+		ExternalID:   "bad-last-four",
+		Metadata: map[string]string{
+			"last_four": "12x4",
+		},
+	}})
+	if err == nil {
+		t.Fatal("expected invalid last_four to fail")
+	}
+	if !errors.As(err, &app) || app.Code != ErrValidation {
+		t.Fatalf("expected validation error, got %#v", err)
+	}
+
+	_, _, err = s.CreateAccountWithExternalRefs(ctx, "Invalid URL", AccountAsset, "confidential", []ExternalSourceRef{{
+		SourceSystem: "mercury",
+		ExternalID:   "bad-url",
+		URL:          "http://dashboard.mercury.com/accounts/bad-url",
+	}})
+	if err == nil {
+		t.Fatal("expected non-https URL to fail")
+	}
+	if !errors.As(err, &app) || app.Code != ErrValidation {
+		t.Fatalf("expected validation error, got %#v", err)
+	}
+}
+
 func TestSourceTaggedJournalEntriesAreBalancedAndIdempotent(t *testing.T) {
 	s, ctx := newTestStore(t)
 	cash := mustAccount(t, s, ctx, "Operating Bank", AccountAsset)

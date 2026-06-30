@@ -1,9 +1,11 @@
 package infobase
 
 import (
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type accountCreatePayload struct {
@@ -16,6 +18,10 @@ type journalCreatePayload struct {
 }
 
 func (s *Store) CreateAccount(ctx Context, name string, typ AccountType, sensitivity string) (Account, string, error) {
+	return s.CreateAccountWithExternalRefs(ctx, name, typ, sensitivity, nil)
+}
+
+func (s *Store) CreateAccountWithExternalRefs(ctx Context, name string, typ AccountType, sensitivity string, externalRefs []ExternalSourceRef) (Account, string, error) {
 	st, err := s.LoadState()
 	if err != nil {
 		return Account{}, "", err
@@ -30,6 +36,20 @@ func (s *Store) CreateAccount(ctx Context, name string, typ AccountType, sensiti
 	if err := validateAccountType(typ); err != nil {
 		return Account{}, "", err
 	}
+	externalRefs, err = normalizeExternalRefs(externalRefs)
+	if err != nil {
+		return Account{}, "", err
+	}
+	for _, externalRef := range externalRefs {
+		key := externalRefKey(externalRef)
+		for _, existing := range st.Accounts {
+			for _, existingRef := range existing.ExternalRefs {
+				if externalRefKey(existingRef) == key {
+					return Account{}, "", appErr(ErrConflict, "external ref %q already belongs to account %s", key, existing.ID)
+				}
+			}
+		}
+	}
 	id := makeID("acct", strings.ToLower(name), string(typ))
 	if _, exists := st.Accounts[id]; exists {
 		return Account{}, "", appErr(ErrConflict, "account already exists: %s", id)
@@ -38,9 +58,97 @@ func (s *Store) CreateAccount(ctx Context, name string, typ AccountType, sensiti
 		sensitivity = "internal"
 	}
 	now := s.now().UTC()
-	acct := Account{ID: id, Name: name, Type: typ, Sensitivity: sensitivity, CreatedAt: now, CreatedBy: ctx.Actor}
+	acct := Account{ID: id, Name: name, Type: typ, Sensitivity: sensitivity, ExternalRefs: externalRefs, CreatedAt: now, CreatedBy: ctx.Actor}
 	hash, err := s.appendEvent(ctx, "ledger.account", id, "ledger account create", wrapEvent("account.create", accountCreatePayload{Account: acct}), true)
 	return acct, hash, err
+}
+
+func normalizeExternalRefs(refs []ExternalSourceRef) ([]ExternalSourceRef, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	out := make([]ExternalSourceRef, 0, len(refs))
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		normalized, empty, err := normalizeExternalRef(ref)
+		if err != nil {
+			return nil, err
+		}
+		if empty {
+			continue
+		}
+		key := externalRefKey(normalized)
+		if seen[key] {
+			return nil, appErr(ErrConflict, "duplicate external ref %q on account", key)
+		}
+		seen[key] = true
+		out = append(out, normalized)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func normalizeExternalRef(ref ExternalSourceRef) (ExternalSourceRef, bool, error) {
+	ref.SourceSystem = strings.ToLower(strings.TrimSpace(ref.SourceSystem))
+	ref.ExternalID = strings.TrimSpace(ref.ExternalID)
+	ref.ExternalType = strings.TrimSpace(ref.ExternalType)
+	ref.DisplayName = strings.TrimSpace(ref.DisplayName)
+	ref.URL = strings.TrimSpace(ref.URL)
+	ref.Metadata = normalizeStringMap(ref.Metadata)
+	if ref.SourceSystem == "" && ref.ExternalID == "" && ref.ExternalType == "" && ref.DisplayName == "" && ref.URL == "" && len(ref.Metadata) == 0 {
+		return ExternalSourceRef{}, true, nil
+	}
+	if ref.SourceSystem == "" {
+		return ExternalSourceRef{}, false, appErr(ErrValidation, "external ref source system is required when external metadata is provided")
+	}
+	if ref.ExternalID == "" {
+		return ExternalSourceRef{}, false, appErr(ErrValidation, "external ref id is required when external metadata is provided")
+	}
+	if lastFour := ref.Metadata["last_four"]; lastFour != "" {
+		if len(lastFour) != 4 {
+			return ExternalSourceRef{}, false, appErr(ErrValidation, "external ref metadata last_four must contain exactly four digits")
+		}
+		for _, r := range lastFour {
+			if !unicode.IsDigit(r) {
+				return ExternalSourceRef{}, false, appErr(ErrValidation, "external ref metadata last_four must contain exactly four digits")
+			}
+		}
+	}
+	if ref.URL != "" {
+		parsed, err := url.Parse(ref.URL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return ExternalSourceRef{}, false, appErr(ErrValidation, "external ref url must be an absolute URL")
+		}
+		if parsed.Scheme != "https" {
+			return ExternalSourceRef{}, false, appErr(ErrValidation, "external ref url must use https")
+		}
+	}
+	return ref, false, nil
+}
+
+func normalizeStringMap(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for k, v := range input {
+		key := strings.ToLower(strings.TrimSpace(k))
+		value := strings.TrimSpace(v)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func externalRefKey(ref ExternalSourceRef) string {
+	return strings.ToLower(strings.TrimSpace(ref.SourceSystem)) + ":" + strings.TrimSpace(ref.ExternalID)
 }
 
 func validateAccountType(typ AccountType) error {

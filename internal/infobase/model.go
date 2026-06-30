@@ -36,12 +36,22 @@ const (
 )
 
 type Account struct {
-	ID          string      `json:"id"`
-	Name        string      `json:"name"`
-	Type        AccountType `json:"type"`
-	Sensitivity string      `json:"sensitivity"`
-	CreatedAt   time.Time   `json:"created_at"`
-	CreatedBy   string      `json:"created_by"`
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	Type         AccountType         `json:"type"`
+	Sensitivity  string              `json:"sensitivity"`
+	ExternalRefs []ExternalSourceRef `json:"external_refs,omitempty"`
+	CreatedAt    time.Time           `json:"created_at"`
+	CreatedBy    string              `json:"created_by"`
+}
+
+type ExternalSourceRef struct {
+	SourceSystem string            `json:"source_system"`
+	ExternalID   string            `json:"external_id"`
+	ExternalType string            `json:"external_type,omitempty"`
+	DisplayName  string            `json:"display_name,omitempty"`
+	URL          string            `json:"url,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
 type Posting struct {
