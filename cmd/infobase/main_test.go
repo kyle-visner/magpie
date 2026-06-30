@@ -107,6 +107,51 @@ func TestCLICreatesAccountWithExternalRefMetadata(t *testing.T) {
 	}
 }
 
+func TestCLIUpdatesExistingAccountExternalRefMetadata(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--name", "Operating Bank",
+		"--type", "asset",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	accountID := extractNestedString(t, out.Bytes(), "account", "id")
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "external-ref", "set",
+		"--account-id", accountID,
+		"--external-source", "mercury",
+		"--external-id", "mercury-account-1",
+		"--external-type", "bank_account",
+		"--external-display-name", "Mercury Operating Checking",
+		"--external-meta", "last_four=1234",
+		"--external-meta", "nickname=Operating Updated",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	account := decoded["account"].(map[string]any)
+	externalRefs := account["external_refs"].([]any)
+	external := externalRefs[0].(map[string]any)
+	metadata := external["metadata"].(map[string]any)
+	if external["source_system"] != "mercury" ||
+		external["external_id"] != "mercury-account-1" ||
+		metadata["nickname"] != "Operating Updated" {
+		t.Fatalf("unexpected updated external ref: %#v", external)
+	}
+}
+
 func extractNestedString(t *testing.T, raw []byte, objectKey, fieldKey string) string {
 	t.Helper()
 	var decoded map[string]any

@@ -12,6 +12,10 @@ type accountCreatePayload struct {
 	Account Account `json:"account"`
 }
 
+type accountUpdatePayload struct {
+	Account Account `json:"account"`
+}
+
 type journalCreatePayload struct {
 	Entry     JournalEntry `json:"entry"`
 	SourceKey string       `json:"source_key,omitempty"`
@@ -61,6 +65,57 @@ func (s *Store) CreateAccountWithExternalRefs(ctx Context, name string, typ Acco
 	acct := Account{ID: id, Name: name, Type: typ, Sensitivity: sensitivity, ExternalRefs: externalRefs, CreatedAt: now, CreatedBy: ctx.Actor}
 	hash, err := s.appendEvent(ctx, "ledger.account", id, "ledger account create", wrapEvent("account.create", accountCreatePayload{Account: acct}), true)
 	return acct, hash, err
+}
+
+func (s *Store) SetAccountExternalRef(ctx Context, accountID string, ref ExternalSourceRef) (Account, string, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return Account{}, "", err
+	}
+	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
+		return Account{}, "", err
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return Account{}, "", appErr(ErrValidation, "account id is required")
+	}
+	account, ok := st.Accounts[accountID]
+	if !ok {
+		return Account{}, "", appErr(ErrNotFound, "account %s not found", accountID)
+	}
+	normalized, empty, err := normalizeExternalRef(ref)
+	if err != nil {
+		return Account{}, "", err
+	}
+	if empty {
+		return Account{}, "", appErr(ErrValidation, "external ref metadata is required")
+	}
+	key := externalRefKey(normalized)
+	for _, existing := range st.Accounts {
+		if existing.ID == accountID {
+			continue
+		}
+		for _, existingRef := range existing.ExternalRefs {
+			if externalRefKey(existingRef) == key {
+				return Account{}, "", appErr(ErrConflict, "external ref %q already belongs to account %s", key, existing.ID)
+			}
+		}
+	}
+	replaced := false
+	refs := append([]ExternalSourceRef(nil), account.ExternalRefs...)
+	for i, existingRef := range refs {
+		if externalRefKey(existingRef) == key {
+			refs[i] = normalized
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		refs = append(refs, normalized)
+	}
+	account.ExternalRefs = refs
+	hash, err := s.appendEvent(ctx, "ledger.account", account.ID, "ledger account external-ref set", wrapEvent("account.update", accountUpdatePayload{Account: account}), true)
+	return account, hash, err
 }
 
 func normalizeExternalRefs(refs []ExternalSourceRef) ([]ExternalSourceRef, error) {

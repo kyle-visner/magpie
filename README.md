@@ -243,6 +243,23 @@ Submit JSON account definitions with:
   --file ./account.json
 ```
 
+Add or update an external ref on an existing account:
+
+```sh
+./infobase --store .infobase --actor owner ledger account external-ref set \
+  --account-id acct:OPERATING_BANK_ID \
+  --external-source mercury \
+  --external-id mercury-account-1 \
+  --external-type bank_account \
+  --external-display-name "Mercury Operating Checking" \
+  --external-meta account_kind=checking \
+  --external-meta "nickname=Operating Checking" \
+  --external-meta 'mask=****1234' \
+  --external-meta last_four=1234
+```
+
+If the account already has a ref with the same `source_system + external_id`, the command replaces that ref. If another account already has that ref, the command fails with a conflict.
+
 Validation rules:
 
 - `--external-source` and `--external-id` are required when any external metadata is provided.
@@ -365,6 +382,7 @@ rbac role set --name NAME --permissions p1,p2
 rbac user set --id ID --role ROLE
 ledger account create --name NAME --type TYPE [--external-source SOURCE --external-id ID]
 ledger account create-json --file account.json
+ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID
 ledger account list
 ledger journal create --file entry.json
 ledger journal list

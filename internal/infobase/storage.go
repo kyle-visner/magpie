@@ -297,6 +297,15 @@ func (s *Store) applyNode(st *State, node Node) error {
 			return err
 		}
 		st.Accounts[ev.Account.ID] = ev.Account
+	case "account.update":
+		var ev accountUpdatePayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return err
+		}
+		if _, ok := st.Accounts[ev.Account.ID]; !ok {
+			return appErr(ErrValidation, "account.update references unknown account %s", ev.Account.ID)
+		}
+		st.Accounts[ev.Account.ID] = ev.Account
 	case "journal.create":
 		var ev journalCreatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
