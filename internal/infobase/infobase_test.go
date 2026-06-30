@@ -151,6 +151,79 @@ func TestAccountExternalRefsAreStructuredAndUnique(t *testing.T) {
 	}
 }
 
+func TestAccountExternalRefCanBeAddedAndUpdatedAfterCreation(t *testing.T) {
+	s, ctx := newTestStore(t)
+	account := mustAccount(t, s, ctx, "Operating Bank", AccountAsset)
+
+	updated, _, err := s.SetAccountExternalRef(ctx, account.ID, ExternalSourceRef{
+		SourceSystem: "mercury",
+		ExternalID:   "mercury-account-1",
+		ExternalType: "bank_account",
+		DisplayName:  "Mercury Operating Checking",
+		Metadata: map[string]string{
+			"last_four": "1234",
+			"nickname":  "Operating",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.ExternalRefs) != 1 {
+		t.Fatalf("expected external ref to be added, got %#v", updated.ExternalRefs)
+	}
+	if updated.ExternalRefs[0].Metadata["nickname"] != "Operating" {
+		t.Fatalf("unexpected initial metadata: %#v", updated.ExternalRefs[0])
+	}
+
+	updated, _, err = s.SetAccountExternalRef(ctx, account.ID, ExternalSourceRef{
+		SourceSystem: "mercury",
+		ExternalID:   "mercury-account-1",
+		ExternalType: "bank_account",
+		DisplayName:  "Mercury Operating Checking",
+		Metadata: map[string]string{
+			"last_four": "1234",
+			"nickname":  "Operating Updated",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.ExternalRefs) != 1 {
+		t.Fatalf("expected matching external ref to be replaced, got %#v", updated.ExternalRefs)
+	}
+	if updated.ExternalRefs[0].Metadata["nickname"] != "Operating Updated" {
+		t.Fatalf("expected updated metadata, got %#v", updated.ExternalRefs[0])
+	}
+
+	other := mustAccount(t, s, ctx, "Backup Bank", AccountAsset)
+	_, _, err = s.SetAccountExternalRef(ctx, other.ID, ExternalSourceRef{
+		SourceSystem: "mercury",
+		ExternalID:   "mercury-account-1",
+	})
+	if err == nil {
+		t.Fatal("expected duplicate external ref on another account to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrConflict {
+		t.Fatalf("expected duplicate external ref conflict, got %#v", err)
+	}
+
+	nodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawUpdate bool
+	for _, node := range nodes {
+		if node.Type == "ledger.account" && node.Command == "ledger account external-ref set" {
+			sawUpdate = true
+			break
+		}
+	}
+	if !sawUpdate {
+		t.Fatal("expected account external-ref update to be versioned in audit log")
+	}
+}
+
 func TestAccountExternalRefValidation(t *testing.T) {
 	s, ctx := newTestStore(t)
 	_, _, err := s.CreateAccountWithExternalRefs(ctx, "Invalid External Ref", AccountAsset, "confidential", []ExternalSourceRef{{

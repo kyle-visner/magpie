@@ -191,6 +191,8 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 			return err
 		}
 		return writeJSON(out, map[string]any{"root": root, "account": acct})
+	case "external-ref":
+		return a.ledgerAccountExternalRef(args[1:], out)
 	case "list":
 		st, err := a.store.LoadState()
 		if err != nil {
@@ -203,6 +205,36 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 	default:
 		return fmt.Errorf("unknown ledger account command %q", args[0])
 	}
+}
+
+func (a app) ledgerAccountExternalRef(args []string, out io.Writer) error {
+	if len(args) < 1 || args[0] != "set" {
+		return fmt.Errorf("usage: ledger account external-ref set --account-id ACCOUNT_ID --external-source SOURCE --external-id ID")
+	}
+	fs := newFlagSet("ledger account external-ref set")
+	accountID := fs.String("account-id", "", "InfoBase account id")
+	externalSource := fs.String("external-source", "", "external source system, such as mercury")
+	externalID := fs.String("external-id", "", "external source id")
+	externalType := fs.String("external-type", "", "external source type, such as bank_account or chart_account")
+	externalDisplayName := fs.String("external-display-name", "", "external display name")
+	externalURL := fs.String("external-url", "", "external source URL")
+	externalMetadata := metadataFlag{}
+	fs.Var(&externalMetadata, "external-meta", "external metadata key=value; may be repeated")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	account, root, err := a.store.SetAccountExternalRef(a.ctx, *accountID, infobase.ExternalSourceRef{
+		SourceSystem: *externalSource,
+		ExternalID:   *externalID,
+		ExternalType: *externalType,
+		DisplayName:  *externalDisplayName,
+		URL:          *externalURL,
+		Metadata:     externalMetadata,
+	})
+	if err != nil {
+		return err
+	}
+	return writeJSON(out, map[string]any{"root": root, "account": account})
 }
 
 func (a app) ledgerJournal(args []string, out io.Writer) error {
@@ -319,6 +351,7 @@ Commands:
   rbac user set --id ID --role ROLE
   ledger account create --name NAME --type TYPE [--external-source SOURCE --external-id ID]
   ledger account create-json --file account.json
+  ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID
   ledger account list
   ledger journal create --file entry.json
   ledger journal list
