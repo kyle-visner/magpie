@@ -11,6 +11,9 @@ It is built around one rule: agents and humans use the same CLI, and the CLI enf
 - AES-256-GCM encryption for stored node payloads.
 - Unified RBAC for ledger, notes, snapshots, and audit reads.
 - Double-entry ledger validation before persistence.
+- Book-level accounting basis support for cash, modified cash, and accrual accounting.
+- Chart account roles for workflow-safe account selection.
+- Privileged manual journal adjustments with required audit reasons.
 - Structured external source references on ledger accounts.
 - Markdown note create, update, list, and get operations.
 - Source-tagged journal entries for agent-mapped exports from QuickBooks or other systems.
@@ -62,7 +65,10 @@ Operational rules for agents:
 - Treat stderr as JSON error output.
 - Never edit `.infobase/` files directly.
 - Never invent raw storage mutations.
-- Use `ledger account list` before creating journal entries so account IDs are exact.
+- Read `book settings get` before posting financial activity.
+- Use the active `accounting_basis` for the whole book; do not choose cash, modified cash, or accrual per transaction.
+- Use account roles rather than account names or numbers when deciding what an account means.
+- Do not use generic `ledger journal create` for ordinary operating activity. It is a privileged manual adjustment/import path.
 - Use `note put --body-file FILE` for long note bodies to avoid shell quoting issues.
 - Create a `snapshot create --name NAME` before large agent workflows.
 
@@ -151,20 +157,69 @@ Read a specific note:
 ./infobase --store .infobase --actor notes-agent note get --id note:...
 ```
 
+## Book Accounting Basis
+
+InfoBase is opinionated about accounting methods. The book has exactly one active accounting basis:
+
+- `cash`: recognize income when cash is received and expenses when cash is paid.
+- `modified_cash`: cash treatment for ordinary income and expenses, with explicit balance-sheet treatment for sales tax liabilities, payroll tax liabilities, loan principal, and capitalized fixed assets.
+- `accrual`: recognize revenue when earned or invoiced and expenses when incurred or billed, using accounts receivable and accounts payable where appropriate.
+
+New stores default to `cash`. Check the current setting before an agent posts entries:
+
+```sh
+./infobase --store .infobase --actor owner book settings get
+```
+
+Set the accounting basis before entering journal activity:
+
+```sh
+./infobase --store .infobase --actor owner book settings set \
+  --accounting-basis accrual
+```
+
+Changing the accounting basis requires `settings:manage`, which the default `Owner` and `Admin` roles have. InfoBase rejects basis changes after journal entries exist, because changing accounting method after postings would require a controlled migration or restatement workflow.
+
+Every new journal entry is stamped with the active `accounting_basis`. If an agent submits a journal entry with an explicit `accounting_basis` that does not match the active book setting, the write is rejected.
+
+Modified cash policy is deliberately narrow:
+
+- Revenue is recognized when cash is received.
+- Ordinary expenses are recognized when cash is paid.
+- Sales tax and payroll tax are tracked as liabilities.
+- Loan principal is tracked as a liability, separate from interest expense.
+- Fixed assets are capitalized.
+- Inventory, accounts receivable, and accounts payable are not used by default.
+
+For normal service invoices, agents should post according to the active basis:
+
+- Cash or modified cash, when paid: debit cash, credit revenue, credit sales tax payable when collected.
+- Accrual, when issued: debit accounts receivable, credit revenue, credit sales tax payable.
+- Accrual, when paid: debit cash, credit accounts receivable.
+
+For vendor bills:
+
+- Cash or modified cash: expense when paid, except for explicit modified-cash balance-sheet items such as fixed assets, loans, and taxes.
+- Accrual: on bill, debit expense or asset and credit accounts payable; on payment, debit accounts payable and credit cash.
+
+InfoBase currently prevents ordinary agents from bypassing these rules with generic manual journals. The upcoming invoice workflow must enforce the A/R versus cash-basis posting semantics directly.
+
 ## Ledger Workflow
 
-Create accounts as an actor with `ledger:write`:
+Create accounts as an actor with `ledger:write`. Assigning a role at create time also requires `chart:manage`:
 
 ```sh
 ./infobase --store .infobase --actor owner ledger account create \
   --number 1000 \
   --name Checking \
-  --type asset
+  --type asset \
+  --role bank_account
 
 ./infobase --store .infobase --actor owner ledger account create \
   --number 4000 \
   --name "Consulting Revenue" \
-  --type revenue
+  --type revenue \
+  --role default_service_revenue
 ```
 
 Account numbers are optional but first-class. They are stored separately from account IDs, so journal entries continue to reference stable `acct:...` IDs even if an account is renumbered.
@@ -189,6 +244,31 @@ List accounts and capture the generated account IDs:
 ./infobase --store .infobase --actor owner ledger account list
 ```
 
+## Account Roles
+
+Account roles tell InfoBase what an account means inside accounting workflows. Type alone is not enough: an `asset` may be cash, accounts receivable, inventory, a fixed asset, or a contra-asset.
+
+List supported roles:
+
+```sh
+./infobase --store .infobase --actor owner ledger account role list
+```
+
+Assign or update a role as an actor with `chart:manage`:
+
+```sh
+./infobase --store .infobase --actor owner ledger account role set \
+  --account-id acct:CHECKING_ID \
+  --role operating_cash
+```
+
+Role rules:
+
+- Roles must match account type. For example, `accounts_receivable` requires an `asset` account and `sales_tax_payable` requires a `liability` account.
+- Roles such as `operating_cash`, `accounts_receivable`, `accounts_payable`, `sales_tax_payable`, `retained_earnings`, and default revenue roles are unique.
+- Roles such as `bank_account`, `fixed_asset`, `inventory`, and `default_expense` can be assigned to the accounts they represent when allowed by validation.
+- Workflow commands should require roles, not hard-coded account names or chart numbers.
+
 ## External Source References
 
 Ledger accounts can carry first-class external source references for bank sync, reconciliation, and migration traceability. This is intentionally stored on the account, not in sidecar notes or name-only conventions.
@@ -200,6 +280,7 @@ Example Mercury account:
   --number 1010 \
   --name "Mercury Checking ****1234" \
   --type asset \
+  --role bank_account \
   --sensitivity confidential \
   --external-source mercury \
   --external-id mercury-account-1 \
@@ -217,6 +298,7 @@ Stored account JSON includes:
 ```json
 {
   "number": "1010",
+  "role": "bank_account",
   "external_refs": [
     {
       "source_system": "mercury",
@@ -289,12 +371,19 @@ Validation rules:
 - `metadata.last_four`, when present, must contain exactly four digits.
 - The pair `source_system + external_id` must be unique across ledger accounts.
 
-Create a balanced journal entry JSON file:
+## Manual Journal Adjustments
+
+Generic journal creation is restricted. It requires both `ledger:write` and `journal:adjust`, and it must include a `manual_reason`. Default `Owner` and `Admin` roles have `journal:adjust`; ordinary bookkeeping agents should not.
+
+Manual journals are for controlled adjustments, opening/import work, and emergency correction workflows until first-class domain workflows exist. Future invoice, bill, bank-match, tax, loan, transfer, and fixed-asset commands should generate workflow-originated journals instead of asking agents to hand-author postings.
+
+Create a balanced manual journal JSON file:
 
 ```json
 {
   "date": "2026-06-29",
-  "memo": "Invoice paid",
+  "memo": "Opening import adjustment",
+  "manual_reason": "Owner-approved migration from legacy bookkeeping export",
   "source": "quickbooks_export",
   "source_key": "qb-row-123",
   "postings": [
@@ -321,6 +410,16 @@ The write is rejected unless total debits exactly equal total credits.
 
 If `source` and `source_key` are both present, InfoBase uses them as an idempotency key. Re-submitting the same source-tagged entry returns the existing entry instead of creating a duplicate.
 
+Manual entries are stored with:
+
+```json
+{
+  "origin": "manual_adjustment",
+  "accounting_basis": "cash",
+  "manual_reason": "Owner-approved migration from legacy bookkeeping export"
+}
+```
+
 List journal entries:
 
 ```sh
@@ -329,13 +428,13 @@ List journal entries:
 
 ## Agent-Mapped External Exports
 
-InfoBase does not include a QuickBooks-specific CSV/IIF/QBXML parser in the CLI. The agent is responsible for reading exports from QuickBooks or any other external system and mapping them into InfoBase's canonical journal-entry JSON.
+InfoBase does not include a QuickBooks-specific CSV/IIF/QBXML parser in the CLI. The agent is responsible for reading exports from QuickBooks or any other external system and mapping them into InfoBase's canonical manual journal JSON when doing a controlled migration or adjustment.
 
 The expected agent flow is:
 
 1. Read the external export.
 2. Use `ledger account list` to find exact InfoBase account IDs.
-3. Build balanced journal-entry JSON.
+3. Build balanced manual journal JSON with `manual_reason`.
 4. Include `source` and `source_key` from the external row or transaction ID.
 5. Submit each canonical entry with `ledger journal create --file FILE`.
 
@@ -345,6 +444,7 @@ Example agent-produced journal entry:
 {
   "date": "2026-06-01",
   "memo": "QuickBooks invoice payment INV-1001",
+  "manual_reason": "Owner-approved migration from QuickBooks export",
   "source": "quickbooks_export",
   "source_key": "INV-1001-payment",
   "postings": [
@@ -367,7 +467,7 @@ Submit it:
   --file ./agent-mapped-entry.json
 ```
 
-This keeps InfoBase's CLI narrow and opinionated. The CLI validates permissions, account existence, double-entry balance, source-key idempotency, encryption, and immutable storage; the agent handles source-specific interpretation.
+This keeps InfoBase's CLI narrow and opinionated. The CLI validates permissions, account existence, double-entry balance, source-key idempotency, manual-journal authorization, encryption, and immutable storage; the agent handles source-specific interpretation. Ordinary ongoing bookkeeping should move to domain workflows rather than generic manual journals.
 
 ## Snapshots And Audit
 
@@ -398,12 +498,16 @@ Both `state` and `audit` require `audit:read`.
 init
 state
 audit
+book settings get
+book settings set --accounting-basis cash|modified_cash|accrual
 rbac permissions
 rbac role set --name NAME --permissions p1,p2
 rbac user set --id ID --role ROLE
-ledger account create --name NAME --type TYPE [--number NUMBER]
+ledger account create --name NAME --type TYPE [--number NUMBER] [--role ROLE]
 ledger account create-json --file account.json
 ledger account number set --account-id ID --number NUMBER
+ledger account role list
+ledger account role set --account-id ID --role ROLE
 ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID
 ledger account list
 ledger journal create --file entry.json

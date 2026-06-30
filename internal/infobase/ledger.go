@@ -2,6 +2,7 @@ package infobase
 
 import (
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,21 @@ func (s *Store) CreateAccountWithDetails(ctx Context, account Account) (Account,
 	if err := validateAccountType(account.Type); err != nil {
 		return Account{}, "", err
 	}
+	role, err := normalizeAccountRole(account.Role)
+	if err != nil {
+		return Account{}, "", err
+	}
+	if role != "" {
+		if err := EnsurePermission(st, ctx, PermissionChartManage); err != nil {
+			return Account{}, "", err
+		}
+	}
+	if err := validateAccountRoleForType(role, account.Type); err != nil {
+		return Account{}, "", err
+	}
+	if err := ensureAccountRoleAvailable(st, "", role); err != nil {
+		return Account{}, "", err
+	}
 	number, err := normalizeAccountNumber(account.Number)
 	if err != nil {
 		return Account{}, "", err
@@ -76,7 +92,7 @@ func (s *Store) CreateAccountWithDetails(ctx Context, account Account) (Account,
 		account.Sensitivity = "internal"
 	}
 	now := s.now().UTC()
-	acct := Account{ID: id, Number: number, Name: account.Name, Type: account.Type, Sensitivity: account.Sensitivity, ExternalRefs: externalRefs, CreatedAt: now, CreatedBy: ctx.Actor}
+	acct := Account{ID: id, Number: number, Name: account.Name, Type: account.Type, Role: role, Sensitivity: account.Sensitivity, ExternalRefs: externalRefs, CreatedAt: now, CreatedBy: ctx.Actor}
 	hash, err := s.appendEvent(ctx, "ledger.account", id, "ledger account create", wrapEvent("account.create", accountCreatePayload{Account: acct}), true)
 	return acct, hash, err
 }
@@ -109,6 +125,43 @@ func (s *Store) SetAccountNumber(ctx Context, accountID string, number string) (
 	}
 	account.Number = normalized
 	hash, err := s.appendEvent(ctx, "ledger.account", account.ID, "ledger account number set", wrapEvent("account.update", accountUpdatePayload{Account: account}), true)
+	return account, hash, err
+}
+
+func (s *Store) SetAccountRole(ctx Context, accountID string, role AccountRole) (Account, string, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return Account{}, "", err
+	}
+	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
+		return Account{}, "", err
+	}
+	if err := EnsurePermission(st, ctx, PermissionChartManage); err != nil {
+		return Account{}, "", err
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return Account{}, "", appErr(ErrValidation, "account id is required")
+	}
+	account, ok := st.Accounts[accountID]
+	if !ok {
+		return Account{}, "", appErr(ErrNotFound, "account %s not found", accountID)
+	}
+	normalized, err := normalizeAccountRole(role)
+	if err != nil {
+		return Account{}, "", err
+	}
+	if normalized == "" {
+		return Account{}, "", appErr(ErrValidation, "account role is required")
+	}
+	if err := validateAccountRoleForType(normalized, account.Type); err != nil {
+		return Account{}, "", err
+	}
+	if err := ensureAccountRoleAvailable(st, accountID, normalized); err != nil {
+		return Account{}, "", err
+	}
+	account.Role = normalized
+	hash, err := s.appendEvent(ctx, "ledger.account", account.ID, "ledger account role set", wrapEvent("account.update", accountUpdatePayload{Account: account}), true)
 	return account, hash, err
 }
 
@@ -216,6 +269,98 @@ func ensureAccountNumberAvailable(st State, currentAccountID string, number stri
 	return nil
 }
 
+func normalizeAccountRole(role AccountRole) (AccountRole, error) {
+	normalized := AccountRole(strings.ToLower(strings.TrimSpace(string(role))))
+	if normalized == "" {
+		return "", nil
+	}
+	if _, ok := accountRoleTypes()[normalized]; !ok {
+		return "", appErr(ErrValidation, "invalid account role %q", role)
+	}
+	return normalized, nil
+}
+
+func validateAccountRoleForType(role AccountRole, typ AccountType) error {
+	if role == "" {
+		return nil
+	}
+	expected := accountRoleTypes()[role]
+	if expected != typ {
+		return appErr(ErrValidation, "account role %q requires account type %q", role, expected)
+	}
+	return nil
+}
+
+func ensureAccountRoleAvailable(st State, currentAccountID string, role AccountRole) error {
+	if role == "" || !uniqueAccountRoles()[role] {
+		return nil
+	}
+	for _, existing := range st.Accounts {
+		if existing.ID == currentAccountID {
+			continue
+		}
+		if existing.Role == role {
+			return appErr(ErrConflict, "account role %q already belongs to account %s", role, existing.ID)
+		}
+	}
+	return nil
+}
+
+func accountRoleTypes() map[AccountRole]AccountType {
+	return map[AccountRole]AccountType{
+		AccountRoleOperatingCash:           AccountAsset,
+		AccountRoleBankAccount:             AccountAsset,
+		AccountRoleAccountsReceivable:      AccountAsset,
+		AccountRoleUndepositedFunds:        AccountAsset,
+		AccountRoleInventory:               AccountAsset,
+		AccountRoleFixedAsset:              AccountAsset,
+		AccountRoleAccumulatedDepreciation: AccountAsset,
+		AccountRoleAccountsPayable:         AccountLiability,
+		AccountRoleSalesTaxPayable:         AccountLiability,
+		AccountRolePayrollTaxPayable:       AccountLiability,
+		AccountRoleLoanPrincipal:           AccountLiability,
+		AccountRoleOwnerContribution:       AccountEquity,
+		AccountRoleOwnerDraw:               AccountEquity,
+		AccountRoleRetainedEarnings:        AccountEquity,
+		AccountRoleOpeningBalanceEquity:    AccountEquity,
+		AccountRoleDefaultServiceRevenue:   AccountRevenue,
+		AccountRoleDefaultProductRevenue:   AccountRevenue,
+		AccountRoleOtherIncome:             AccountRevenue,
+		AccountRoleDefaultExpense:          AccountExpense,
+		AccountRoleMerchantFeesExpense:     AccountExpense,
+		AccountRoleInterestExpense:         AccountExpense,
+		AccountRolePayrollExpense:          AccountExpense,
+		AccountRoleDepreciationExpense:     AccountExpense,
+	}
+}
+
+func uniqueAccountRoles() map[AccountRole]bool {
+	return map[AccountRole]bool{
+		AccountRoleOperatingCash:         true,
+		AccountRoleAccountsReceivable:    true,
+		AccountRoleAccountsPayable:       true,
+		AccountRoleSalesTaxPayable:       true,
+		AccountRolePayrollTaxPayable:     true,
+		AccountRoleRetainedEarnings:      true,
+		AccountRoleOpeningBalanceEquity:  true,
+		AccountRoleDefaultServiceRevenue: true,
+		AccountRoleDefaultProductRevenue: true,
+		AccountRoleMerchantFeesExpense:   true,
+		AccountRoleInterestExpense:       true,
+		AccountRolePayrollExpense:        true,
+		AccountRoleDepreciationExpense:   true,
+	}
+}
+
+func AccountRoleNames() []string {
+	roles := make([]string, 0, len(accountRoleTypes()))
+	for role := range accountRoleTypes() {
+		roles = append(roles, string(role))
+	}
+	sort.Strings(roles)
+	return roles
+}
+
 func normalizeExternalRef(ref ExternalSourceRef) (ExternalSourceRef, bool, error) {
 	ref.SourceSystem = strings.ToLower(strings.TrimSpace(ref.SourceSystem))
 	ref.ExternalID = strings.TrimSpace(ref.ExternalID)
@@ -298,7 +443,18 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
 		return JournalEntry{}, "", err
 	}
+	if err := EnsurePermission(st, ctx, PermissionJournalAdjust); err != nil {
+		return JournalEntry{}, "", appErr(ErrPermission, "manual journal creation requires %s; use invoice, bill, bank, or other domain workflows for operating activity", PermissionJournalAdjust)
+	}
 	entry.Memo = strings.TrimSpace(entry.Memo)
+	entry.Source = strings.TrimSpace(entry.Source)
+	entry.SourceKey = strings.TrimSpace(entry.SourceKey)
+	entry.Workflow = strings.TrimSpace(entry.Workflow)
+	entry.PostingSemantics = strings.TrimSpace(entry.PostingSemantics)
+	entry.SourceDocumentType = strings.TrimSpace(entry.SourceDocumentType)
+	entry.SourceDocumentID = strings.TrimSpace(entry.SourceDocumentID)
+	entry.ManualReason = strings.TrimSpace(entry.ManualReason)
+	entry.Metadata = normalizeStringMap(entry.Metadata)
 	if entry.Date == "" {
 		entry.Date = s.now().UTC().Format("2006-01-02")
 	}
@@ -307,6 +463,33 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 	}
 	if len(entry.Postings) < 2 {
 		return JournalEntry{}, "", appErr(ErrValidation, "journal entry requires at least two postings")
+	}
+	settings := st.effectiveSettings()
+	if entry.AccountingBasis == "" {
+		entry.AccountingBasis = settings.AccountingBasis
+	} else {
+		basis, err := normalizeAccountingBasis(entry.AccountingBasis)
+		if err != nil {
+			return JournalEntry{}, "", err
+		}
+		if basis != settings.AccountingBasis {
+			return JournalEntry{}, "", appErr(ErrValidation, "journal accounting basis %q does not match active book basis %q", basis, settings.AccountingBasis)
+		}
+		entry.AccountingBasis = basis
+	}
+	origin, err := normalizeJournalOrigin(entry.Origin)
+	if err != nil {
+		return JournalEntry{}, "", err
+	}
+	if origin == "" {
+		origin = JournalOriginManualAdjustment
+	}
+	if origin != JournalOriginManualAdjustment {
+		return JournalEntry{}, "", appErr(ErrValidation, "ledger journal create only accepts origin %q; generated workflow journals must use canonical workflows", JournalOriginManualAdjustment)
+	}
+	entry.Origin = origin
+	if entry.Workflow != "" {
+		return JournalEntry{}, "", appErr(ErrValidation, "manual journal entries cannot set workflow metadata")
 	}
 	var debit, credit int64
 	for i, p := range entry.Postings {
@@ -331,8 +514,11 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 	if debit != credit {
 		return JournalEntry{}, "", appErr(ErrValidation, "journal entry must balance: debit=%d credit=%d", debit, credit)
 	}
+	if entry.ManualReason == "" {
+		return JournalEntry{}, "", appErr(ErrValidation, "manual journal entries require manual_reason")
+	}
 	if entry.ID == "" {
-		entry.ID = makeID("jrnl", entry.Date, entry.Memo, postingFingerprint(entry.Postings), sourceKey)
+		entry.ID = makeID("jrnl", string(entry.AccountingBasis), entry.Date, entry.Memo, postingFingerprint(entry.Postings), sourceKey)
 	}
 	if sourceKey != "" {
 		if existingID, ok := st.SourceKeys[sourceKey]; ok {
@@ -346,6 +532,7 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 	if _, exists := st.JournalEntries[entry.ID]; exists {
 		return JournalEntry{}, "", appErr(ErrConflict, "journal entry already exists: %s", entry.ID)
 	}
+	entry.GeneratedBy = ctx.Actor
 	entry.CreatedAt = s.now().UTC()
 	entry.CreatedBy = ctx.Actor
 	hash, err := s.appendEvent(ctx, "ledger.journal", entry.ID, "ledger journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), true)
@@ -353,14 +540,25 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 }
 
 func sourceKeyForEntry(entry JournalEntry) string {
-	if entry.Source == "" || entry.SourceKey == "" {
+	source := strings.TrimSpace(entry.Source)
+	sourceKey := strings.TrimSpace(entry.SourceKey)
+	if source == "" || sourceKey == "" {
 		return ""
 	}
-	return entry.Source + ":" + entry.SourceKey
+	return source + ":" + sourceKey
 }
 
 func journalEquivalent(a, b JournalEntry) bool {
-	if a.Date != b.Date || a.Memo != b.Memo || a.Source != b.Source || a.SourceKey != b.SourceKey {
+	if a.Date != b.Date ||
+		a.Memo != b.Memo ||
+		a.AccountingBasis != b.AccountingBasis ||
+		a.Origin != b.Origin ||
+		a.Workflow != b.Workflow ||
+		a.PostingSemantics != b.PostingSemantics ||
+		a.SourceDocumentType != b.SourceDocumentType ||
+		a.SourceDocumentID != b.SourceDocumentID ||
+		a.Source != b.Source ||
+		a.SourceKey != b.SourceKey {
 		return false
 	}
 	if len(a.Postings) != len(b.Postings) {
@@ -372,6 +570,16 @@ func journalEquivalent(a, b JournalEntry) bool {
 		}
 	}
 	return true
+}
+
+func normalizeJournalOrigin(origin JournalOrigin) (JournalOrigin, error) {
+	normalized := JournalOrigin(strings.ToLower(strings.TrimSpace(string(origin))))
+	switch normalized {
+	case "", JournalOriginWorkflow, JournalOriginManualAdjustment, JournalOriginMigration, JournalOriginOpeningBalance, JournalOriginSystem:
+		return normalized, nil
+	default:
+		return "", appErr(ErrValidation, "invalid journal origin %q", origin)
+	}
 }
 
 func postingFingerprint(postings []Posting) string {

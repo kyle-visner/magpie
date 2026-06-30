@@ -3,8 +3,9 @@ package infobase
 import "sort"
 
 type initPayload struct {
-	Roles map[string]Role `json:"roles"`
-	Users map[string]User `json:"users"`
+	Roles    map[string]Role `json:"roles"`
+	Users    map[string]User `json:"users"`
+	Settings BookSettings    `json:"settings"`
 }
 
 type roleUpsertPayload struct {
@@ -22,6 +23,7 @@ func initEvent() eventEnvelope {
 		Users: map[string]User{
 			"owner": {ID: "owner", Role: "Owner"},
 		},
+		Settings: DefaultBookSettings(),
 	})
 }
 
@@ -32,14 +34,16 @@ func defaultRoles() map[string]Role {
 			Permissions: []Permission{
 				PermissionLedgerRead, PermissionLedgerWrite, PermissionNotesRead, PermissionNotesWrite,
 				PermissionRBACManage, PermissionSnapshot, PermissionAuditRead,
-				PermissionAdminRecover,
+				PermissionAdminRecover, PermissionSettingsManage, PermissionJournalAdjust,
+				PermissionChartManage,
 			},
 		},
 		"Admin": {
 			Name: "Admin",
 			Permissions: []Permission{
 				PermissionLedgerRead, PermissionLedgerWrite, PermissionNotesRead, PermissionNotesWrite,
-				PermissionRBACManage, PermissionSnapshot, PermissionAuditRead,
+				PermissionRBACManage, PermissionSnapshot, PermissionAuditRead, PermissionSettingsManage,
+				PermissionJournalAdjust, PermissionChartManage,
 			},
 		},
 		"Accountant": {
@@ -132,6 +136,7 @@ func PermissionNames() []string {
 		string(PermissionLedgerRead), string(PermissionLedgerWrite), string(PermissionNotesRead),
 		string(PermissionNotesWrite), string(PermissionRBACManage),
 		string(PermissionSnapshot), string(PermissionAuditRead), string(PermissionAdminRecover),
+		string(PermissionSettingsManage), string(PermissionJournalAdjust), string(PermissionChartManage),
 	}
 	sort.Strings(perms)
 	return perms
