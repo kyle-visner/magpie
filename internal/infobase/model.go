@@ -15,6 +15,7 @@ const (
 	PermissionAdminRecover   Permission = "admin:recover"
 	PermissionSettingsManage Permission = "settings:manage"
 	PermissionJournalAdjust  Permission = "journal:adjust"
+	PermissionChartManage    Permission = "chart:manage"
 )
 
 type Role struct {

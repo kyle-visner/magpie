@@ -245,6 +245,19 @@ func TestAccountRolesAreTypedUniqueAndUpdatable(t *testing.T) {
 	}
 
 	_, _, err = s.CreateAccountWithDetails(ctx, Account{
+		Name:        "Duplicate Operating Cash",
+		Type:        AccountAsset,
+		Role:        AccountRoleOperatingCash,
+		Sensitivity: "confidential",
+	})
+	if err == nil {
+		t.Fatal("expected duplicate operating_cash role to fail")
+	}
+	if !errors.As(err, &app) || app.Code != ErrConflict {
+		t.Fatalf("expected duplicate operating_cash conflict, got %#v", err)
+	}
+
+	_, _, err = s.CreateAccountWithDetails(ctx, Account{
 		Name:        "Bad Sales Tax Role",
 		Type:        AccountAsset,
 		Role:        AccountRoleSalesTaxPayable,
@@ -270,6 +283,54 @@ func TestAccountRolesAreTypedUniqueAndUpdatable(t *testing.T) {
 	}
 	if !sawRoleUpdate {
 		t.Fatal("expected account role update to be versioned in audit log")
+	}
+}
+
+func TestAccountRoleMutationRequiresChartManage(t *testing.T) {
+	s, owner := newTestStore(t)
+	if _, err := s.UpsertRole(owner, Role{
+		Name: "Bookkeeping Agent",
+		Permissions: []Permission{
+			PermissionLedgerRead,
+			PermissionLedgerWrite,
+			PermissionAuditRead,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertUser(owner, User{ID: "bookkeeper", Role: "Bookkeeping Agent"}); err != nil {
+		t.Fatal(err)
+	}
+	bookkeeper := Context{Actor: "bookkeeper"}
+	acct, _, err := s.CreateAccountWithDetails(bookkeeper, Account{
+		Name:        "Unclassified Agent Account",
+		Type:        AccountAsset,
+		Sensitivity: "confidential",
+	})
+	if err != nil {
+		t.Fatalf("expected ledger writer to create unclassified account: %v", err)
+	}
+
+	_, _, err = s.SetAccountRole(bookkeeper, acct.ID, AccountRoleBankAccount)
+	if err == nil {
+		t.Fatal("expected ledger writer without chart:manage to be denied account role changes")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrPermission {
+		t.Fatalf("expected permission error, got %#v", err)
+	}
+
+	_, _, err = s.CreateAccountWithDetails(bookkeeper, Account{
+		Name:        "Agent Classified Bank",
+		Type:        AccountAsset,
+		Role:        AccountRoleBankAccount,
+		Sensitivity: "confidential",
+	})
+	if err == nil {
+		t.Fatal("expected ledger writer without chart:manage to be denied role assignment at create time")
+	}
+	if !errors.As(err, &app) || app.Code != ErrPermission {
+		t.Fatalf("expected permission error, got %#v", err)
 	}
 }
 
@@ -643,13 +704,23 @@ func TestSourceTaggedJournalEntriesAreBalancedAndIdempotent(t *testing.T) {
 		t.Fatalf("duplicate source-tagged entry persisted entries: %d", len(st.JournalEntries))
 	}
 
+	missingReason := entry
+	missingReason.ManualReason = ""
+	_, _, err = s.CreateJournalEntry(ctx, missingReason)
+	if err == nil {
+		t.Fatal("expected idempotent manual journal resubmission without reason to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrValidation {
+		t.Fatalf("expected missing manual_reason validation error, got %#v", err)
+	}
+
 	conflicting := entry
 	conflicting.Memo = "Changed external row with reused source key"
 	_, _, err = s.CreateJournalEntry(ctx, conflicting)
 	if err == nil {
 		t.Fatal("expected reused source key with different content to fail")
 	}
-	var app *AppError
 	if !errors.As(err, &app) || app.Code != ErrConflict {
 		t.Fatalf("expected source-key conflict, got %#v", err)
 	}

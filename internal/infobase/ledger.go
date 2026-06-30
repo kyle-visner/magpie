@@ -50,6 +50,11 @@ func (s *Store) CreateAccountWithDetails(ctx Context, account Account) (Account,
 	if err != nil {
 		return Account{}, "", err
 	}
+	if role != "" {
+		if err := EnsurePermission(st, ctx, PermissionChartManage); err != nil {
+			return Account{}, "", err
+		}
+	}
 	if err := validateAccountRoleForType(role, account.Type); err != nil {
 		return Account{}, "", err
 	}
@@ -129,6 +134,9 @@ func (s *Store) SetAccountRole(ctx Context, accountID string, role AccountRole) 
 		return Account{}, "", err
 	}
 	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
+		return Account{}, "", err
+	}
+	if err := EnsurePermission(st, ctx, PermissionChartManage); err != nil {
 		return Account{}, "", err
 	}
 	accountID = strings.TrimSpace(accountID)
@@ -328,6 +336,7 @@ func accountRoleTypes() map[AccountRole]AccountType {
 
 func uniqueAccountRoles() map[AccountRole]bool {
 	return map[AccountRole]bool{
+		AccountRoleOperatingCash:         true,
 		AccountRoleAccountsReceivable:    true,
 		AccountRoleAccountsPayable:       true,
 		AccountRoleSalesTaxPayable:       true,
@@ -505,6 +514,9 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 	if debit != credit {
 		return JournalEntry{}, "", appErr(ErrValidation, "journal entry must balance: debit=%d credit=%d", debit, credit)
 	}
+	if entry.ManualReason == "" {
+		return JournalEntry{}, "", appErr(ErrValidation, "manual journal entries require manual_reason")
+	}
 	if entry.ID == "" {
 		entry.ID = makeID("jrnl", string(entry.AccountingBasis), entry.Date, entry.Memo, postingFingerprint(entry.Postings), sourceKey)
 	}
@@ -516,9 +528,6 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 			}
 			return JournalEntry{}, "", appErr(ErrConflict, "source key %q already belongs to journal entry %s", sourceKey, existingID)
 		}
-	}
-	if entry.ManualReason == "" {
-		return JournalEntry{}, "", appErr(ErrValidation, "manual journal entries require manual_reason")
 	}
 	if _, exists := st.JournalEntries[entry.ID]; exists {
 		return JournalEntry{}, "", appErr(ErrConflict, "journal entry already exists: %s", entry.ID)

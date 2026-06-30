@@ -202,11 +202,11 @@ For vendor bills:
 - Cash or modified cash: expense when paid, except for explicit modified-cash balance-sheet items such as fixed assets, loans, and taxes.
 - Accrual: on bill, debit expense or asset and credit accounts payable; on payment, debit accounts payable and credit cash.
 
-InfoBase does not let agents mix A/R-style invoice posting with cash-basis revenue recognition unless the book is configured for the accounting basis that supports it.
+InfoBase currently prevents ordinary agents from bypassing these rules with generic manual journals. The upcoming invoice workflow must enforce the A/R versus cash-basis posting semantics directly.
 
 ## Ledger Workflow
 
-Create accounts as an actor with `ledger:write`:
+Create accounts as an actor with `ledger:write`. Assigning a role at create time also requires `chart:manage`:
 
 ```sh
 ./infobase --store .infobase --actor owner ledger account create \
@@ -254,7 +254,7 @@ List supported roles:
 ./infobase --store .infobase --actor owner ledger account role list
 ```
 
-Assign or update a role:
+Assign or update a role as an actor with `chart:manage`:
 
 ```sh
 ./infobase --store .infobase --actor owner ledger account role set \
@@ -265,7 +265,7 @@ Assign or update a role:
 Role rules:
 
 - Roles must match account type. For example, `accounts_receivable` requires an `asset` account and `sales_tax_payable` requires a `liability` account.
-- Roles such as `accounts_receivable`, `accounts_payable`, `sales_tax_payable`, `retained_earnings`, and default revenue roles are unique.
+- Roles such as `operating_cash`, `accounts_receivable`, `accounts_payable`, `sales_tax_payable`, `retained_earnings`, and default revenue roles are unique.
 - Roles such as `bank_account`, `fixed_asset`, `inventory`, and `default_expense` can be assigned to the accounts they represent when allowed by validation.
 - Workflow commands should require roles, not hard-coded account names or chart numbers.
 
