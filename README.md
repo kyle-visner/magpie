@@ -11,6 +11,7 @@ It is built around one rule: agents and humans use the same CLI, and the CLI enf
 - AES-256-GCM encryption for stored node payloads.
 - Unified RBAC for ledger, notes, snapshots, and audit reads.
 - Double-entry ledger validation before persistence.
+- Structured external source references on ledger accounts.
 - Markdown note create, update, list, and get operations.
 - Source-tagged journal entries for agent-mapped exports from QuickBooks or other systems.
 - Named snapshots for recoverable roots.
@@ -170,6 +171,86 @@ List accounts and capture the generated account IDs:
 ./infobase --store .infobase --actor owner ledger account list
 ```
 
+## External Source References
+
+Ledger accounts can carry first-class external source references for bank sync, reconciliation, and migration traceability. This is intentionally stored on the account, not in sidecar notes or name-only conventions.
+
+Example Mercury account:
+
+```sh
+./infobase --store .infobase --actor owner ledger account create \
+  --name "Mercury Checking ****1234" \
+  --type asset \
+  --sensitivity confidential \
+  --external-source mercury \
+  --external-id mercury-account-1 \
+  --external-type bank_account \
+  --external-display-name "Mercury Operating Checking" \
+  --external-url https://dashboard.mercury.com/accounts/mercury-account-1 \
+  --external-meta account_kind=checking \
+  --external-meta "nickname=Operating Checking" \
+  --external-meta 'mask=****1234' \
+  --external-meta last_four=1234
+```
+
+Stored account JSON includes:
+
+```json
+{
+  "external_refs": [
+    {
+      "source_system": "mercury",
+      "external_id": "mercury-account-1",
+      "external_type": "bank_account",
+      "display_name": "Mercury Operating Checking",
+      "url": "https://dashboard.mercury.com/accounts/mercury-account-1",
+      "metadata": {
+        "account_kind": "checking",
+        "nickname": "Operating Checking",
+        "mask": "****1234",
+        "last_four": "1234"
+      }
+    }
+  ]
+}
+```
+
+Example non-bank chart account mapping:
+
+```json
+{
+  "name": "Sales Tax Payable",
+  "type": "liability",
+  "sensitivity": "confidential",
+  "external_refs": [
+    {
+      "source_system": "quickbooks",
+      "external_id": "42",
+      "external_type": "chart_account",
+      "display_name": "Sales Tax Payable",
+      "metadata": {
+        "classification": "liability"
+      }
+    }
+  ]
+}
+```
+
+Submit JSON account definitions with:
+
+```sh
+./infobase --store .infobase --actor owner ledger account create-json \
+  --file ./account.json
+```
+
+Validation rules:
+
+- `--external-source` and `--external-id` are required when any external metadata is provided.
+- `--external-source` is normalized to lowercase.
+- `--external-url` must be an absolute HTTPS URL.
+- `metadata.last_four`, when present, must contain exactly four digits.
+- The pair `source_system + external_id` must be unique across ledger accounts.
+
 Create a balanced journal entry JSON file:
 
 ```json
@@ -282,7 +363,8 @@ audit
 rbac permissions
 rbac role set --name NAME --permissions p1,p2
 rbac user set --id ID --role ROLE
-ledger account create --name NAME --type TYPE
+ledger account create --name NAME --type TYPE [--external-source SOURCE --external-id ID]
+ledger account create-json --file account.json
 ledger account list
 ledger journal create --file entry.json
 ledger journal list

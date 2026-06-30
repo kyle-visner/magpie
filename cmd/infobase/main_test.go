@@ -62,6 +62,51 @@ func TestCLICreatesAccountAndJournalFromJSON(t *testing.T) {
 	}
 }
 
+func TestCLICreatesAccountWithExternalRefMetadata(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--name", "Mercury Checking ****1234",
+		"--type", "asset",
+		"--external-source", "mercury",
+		"--external-id", "mercury-account-1",
+		"--external-type", "bank_account",
+		"--external-display-name", "Mercury Operating Checking",
+		"--external-url", "https://dashboard.mercury.com/accounts/mercury-account-1",
+		"--external-meta", "account_kind=checking",
+		"--external-meta", "nickname=Operating Checking",
+		"--external-meta", "mask=****1234",
+		"--external-meta", "last_four=1234",
+	}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	account := decoded["account"].(map[string]any)
+	externalRefs := account["external_refs"].([]any)
+	external := externalRefs[0].(map[string]any)
+	metadata := external["metadata"].(map[string]any)
+	if external["source_system"] != "mercury" ||
+		external["external_id"] != "mercury-account-1" ||
+		external["external_type"] != "bank_account" ||
+		external["display_name"] != "Mercury Operating Checking" ||
+		metadata["account_kind"] != "checking" ||
+		metadata["nickname"] != "Operating Checking" ||
+		metadata["mask"] != "****1234" ||
+		metadata["last_four"] != "1234" {
+		t.Fatalf("unexpected external ref metadata: %#v", external)
+	}
+}
+
 func extractNestedString(t *testing.T, raw []byte, objectKey, fieldKey string) string {
 	t.Helper()
 	var decoded map[string]any

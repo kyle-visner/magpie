@@ -153,10 +153,40 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 		name := fs.String("name", "", "account name")
 		typ := fs.String("type", "", "asset|liability|equity|revenue|expense")
 		sensitivity := fs.String("sensitivity", "internal", "sensitivity label")
+		externalSource := fs.String("external-source", "", "external source system, such as mercury")
+		externalID := fs.String("external-id", "", "external source id")
+		externalType := fs.String("external-type", "", "external source type, such as bank_account or chart_account")
+		externalDisplayName := fs.String("external-display-name", "", "external display name")
+		externalURL := fs.String("external-url", "", "external source URL")
+		externalMetadata := metadataFlag{}
+		fs.Var(&externalMetadata, "external-meta", "external metadata key=value; may be repeated")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		acct, root, err := a.store.CreateAccount(a.ctx, *name, infobase.AccountType(*typ), *sensitivity)
+		externalRefs := []infobase.ExternalSourceRef{{
+			SourceSystem: *externalSource,
+			ExternalID:   *externalID,
+			ExternalType: *externalType,
+			DisplayName:  *externalDisplayName,
+			URL:          *externalURL,
+			Metadata:     externalMetadata,
+		}}
+		acct, root, err := a.store.CreateAccountWithExternalRefs(a.ctx, *name, infobase.AccountType(*typ), *sensitivity, externalRefs)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "account": acct})
+	case "create-json":
+		fs := newFlagSet("ledger account create-json")
+		file := fs.String("file", "", "JSON file with an account; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var account infobase.Account
+		if err := readJSONFile(*file, &account); err != nil {
+			return err
+		}
+		acct, root, err := a.store.CreateAccountWithExternalRefs(a.ctx, account.Name, account.Type, account.Sensitivity, account.ExternalRefs)
 		if err != nil {
 			return err
 		}
@@ -287,7 +317,8 @@ Commands:
   rbac permissions
   rbac role set --name NAME --permissions p1,p2
   rbac user set --id ID --role ROLE
-  ledger account create --name NAME --type TYPE
+  ledger account create --name NAME --type TYPE [--external-source SOURCE --external-id ID]
+  ledger account create-json --file account.json
   ledger account list
   ledger journal create --file entry.json
   ledger journal list
@@ -335,6 +366,36 @@ func parsePermissions(s string) []infobase.Permission {
 		perms = append(perms, infobase.Permission(strings.TrimSpace(p)))
 	}
 	return perms
+}
+
+type metadataFlag map[string]string
+
+func (m *metadataFlag) String() string {
+	if m == nil || len(*m) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(*m)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func (m *metadataFlag) Set(value string) error {
+	key, val, ok := strings.Cut(value, "=")
+	if !ok {
+		return fmt.Errorf("metadata must use key=value")
+	}
+	key = strings.TrimSpace(key)
+	val = strings.TrimSpace(val)
+	if key == "" || val == "" {
+		return fmt.Errorf("metadata key and value are required")
+	}
+	if *m == nil {
+		*m = map[string]string{}
+	}
+	(*m)[key] = val
+	return nil
 }
 
 func readJSONFile(path string, into any) error {
