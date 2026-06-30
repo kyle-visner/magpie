@@ -37,8 +37,9 @@ func TestLedgerRequiresBalancedJournalEntries(t *testing.T) {
 	revenue := mustAccount(t, s, ctx, "Sales Revenue", AccountRevenue)
 
 	_, _, err := s.CreateJournalEntry(ctx, JournalEntry{
-		Date: "2026-06-28",
-		Memo: "Unbalanced entry",
+		Date:         "2026-06-28",
+		Memo:         "Unbalanced entry",
+		ManualReason: "test unbalanced manual journal",
 		Postings: []Posting{
 			{AccountID: cash.ID, Debit: 10000},
 			{AccountID: revenue.ID, Credit: 9000},
@@ -113,8 +114,9 @@ func TestBookAccountingBasisIsExplicitVersionedAndEnforced(t *testing.T) {
 	cash := mustAccount(t, s, ctx, "Operating Bank", AccountAsset)
 	revenue := mustAccount(t, s, ctx, "Consulting Revenue", AccountRevenue)
 	entry, _, err := s.CreateJournalEntry(ctx, JournalEntry{
-		Date: "2026-06-28",
-		Memo: "Accrual-basis posting",
+		Date:         "2026-06-28",
+		Memo:         "Accrual-basis posting",
+		ManualReason: "test accrual posting",
 		Postings: []Posting{
 			{AccountID: cash.ID, Debit: 10000},
 			{AccountID: revenue.ID, Credit: 10000},
@@ -131,6 +133,7 @@ func TestBookAccountingBasisIsExplicitVersionedAndEnforced(t *testing.T) {
 		Date:            "2026-06-28",
 		Memo:            "Stale cash-basis posting",
 		AccountingBasis: AccountingBasisCash,
+		ManualReason:    "test stale posting",
 		Postings: []Posting{
 			{AccountID: cash.ID, Debit: 5000},
 			{AccountID: revenue.ID, Credit: 5000},
@@ -186,6 +189,157 @@ func TestOnlySettingsManagersCanChangeAccountingBasis(t *testing.T) {
 
 	if _, err := s.GetBookSettings(accountant); err != nil {
 		t.Fatalf("expected Accountant to read book settings: %v", err)
+	}
+}
+
+func TestAccountRolesAreTypedUniqueAndUpdatable(t *testing.T) {
+	s, ctx := newTestStore(t)
+	cash, _, err := s.CreateAccountWithDetails(ctx, Account{
+		Number:      "1000",
+		Name:        "Operating Bank",
+		Type:        AccountAsset,
+		Role:        AccountRoleBankAccount,
+		Sensitivity: "confidential",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cash.Role != AccountRoleBankAccount {
+		t.Fatalf("expected role to be stored, got %#v", cash)
+	}
+
+	ar, _, err := s.CreateAccountWithDetails(ctx, Account{
+		Number:      "1100",
+		Name:        "Accounts Receivable",
+		Type:        AccountAsset,
+		Role:        AccountRoleAccountsReceivable,
+		Sensitivity: "confidential",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ar.Role != AccountRoleAccountsReceivable {
+		t.Fatalf("expected A/R role, got %#v", ar)
+	}
+
+	updated, _, err := s.SetAccountRole(ctx, cash.ID, AccountRoleOperatingCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Role != AccountRoleOperatingCash {
+		t.Fatalf("expected updated role, got %#v", updated)
+	}
+
+	_, _, err = s.CreateAccountWithDetails(ctx, Account{
+		Name:        "Duplicate Accounts Receivable",
+		Type:        AccountAsset,
+		Role:        AccountRoleAccountsReceivable,
+		Sensitivity: "confidential",
+	})
+	if err == nil {
+		t.Fatal("expected duplicate unique account role to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrConflict {
+		t.Fatalf("expected duplicate role conflict, got %#v", err)
+	}
+
+	_, _, err = s.CreateAccountWithDetails(ctx, Account{
+		Name:        "Bad Sales Tax Role",
+		Type:        AccountAsset,
+		Role:        AccountRoleSalesTaxPayable,
+		Sensitivity: "confidential",
+	})
+	if err == nil {
+		t.Fatal("expected role/type mismatch to fail")
+	}
+	if !errors.As(err, &app) || app.Code != ErrValidation {
+		t.Fatalf("expected role/type validation error, got %#v", err)
+	}
+
+	nodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawRoleUpdate bool
+	for _, node := range nodes {
+		if node.Type == "ledger.account" && node.Command == "ledger account role set" {
+			sawRoleUpdate = true
+			break
+		}
+	}
+	if !sawRoleUpdate {
+		t.Fatal("expected account role update to be versioned in audit log")
+	}
+}
+
+func TestManualJournalRequiresJournalAdjustAndReason(t *testing.T) {
+	s, owner := newTestStore(t)
+	if _, err := s.UpsertRole(owner, Role{
+		Name: "Bookkeeping Agent",
+		Permissions: []Permission{
+			PermissionLedgerRead,
+			PermissionLedgerWrite,
+			PermissionAuditRead,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertUser(owner, User{ID: "bookkeeper", Role: "Bookkeeping Agent"}); err != nil {
+		t.Fatal(err)
+	}
+	cash := mustAccount(t, s, owner, "Operating Bank", AccountAsset)
+	revenue := mustAccount(t, s, owner, "Consulting Revenue", AccountRevenue)
+	bookkeeper := Context{Actor: "bookkeeper"}
+
+	_, _, err := s.CreateJournalEntry(bookkeeper, JournalEntry{
+		Date:         "2026-06-28",
+		Memo:         "Agent arbitrary posting",
+		ManualReason: "agent guessed at a journal",
+		Postings: []Posting{
+			{AccountID: cash.ID, Debit: 10000},
+			{AccountID: revenue.ID, Credit: 10000},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected bookkeeping agent without journal:adjust to be denied")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrPermission {
+		t.Fatalf("expected permission error, got %#v", err)
+	}
+
+	_, _, err = s.CreateJournalEntry(owner, JournalEntry{
+		Date: "2026-06-28",
+		Memo: "Owner adjustment without reason",
+		Postings: []Posting{
+			{AccountID: cash.ID, Debit: 10000},
+			{AccountID: revenue.ID, Credit: 10000},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected manual journal without reason to fail")
+	}
+	if !errors.As(err, &app) || app.Code != ErrValidation {
+		t.Fatalf("expected validation error, got %#v", err)
+	}
+
+	created, _, err := s.CreateJournalEntry(owner, JournalEntry{
+		Date:         "2026-06-28",
+		Memo:         "Owner adjustment with reason",
+		ManualReason: "opening review adjustment approved by owner",
+		Postings: []Posting{
+			{AccountID: cash.ID, Debit: 10000},
+			{AccountID: revenue.ID, Credit: 10000},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Origin != JournalOriginManualAdjustment ||
+		created.ManualReason != "opening review adjustment approved by owner" ||
+		created.GeneratedBy != "owner" {
+		t.Fatalf("unexpected manual journal metadata: %#v", created)
 	}
 }
 
@@ -439,10 +593,11 @@ func TestSourceTaggedJournalEntriesAreBalancedAndIdempotent(t *testing.T) {
 	revenue := mustAccount(t, s, ctx, "Consulting Revenue", AccountRevenue)
 
 	entry := JournalEntry{
-		Date:      "2026-06-01",
-		Memo:      "Agent-mapped external export row",
-		Source:    "quickbooks_export",
-		SourceKey: "qb-1",
+		Date:         "2026-06-01",
+		Memo:         "Agent-mapped external export row",
+		ManualReason: "migration from agent-mapped external export",
+		Source:       "quickbooks_export",
+		SourceKey:    "qb-1",
 		Postings: []Posting{
 			{AccountID: cash.ID, Debit: 125000},
 			{AccountID: revenue.ID, Credit: 125000},
@@ -505,11 +660,12 @@ func TestLegacySourceTaggedJournalWithoutBasisReplaysWithEffectiveBasis(t *testi
 	cash := mustAccount(t, s, ctx, "Operating Bank", AccountAsset)
 	revenue := mustAccount(t, s, ctx, "Consulting Revenue", AccountRevenue)
 	legacy := JournalEntry{
-		ID:        "jrnl:legacy-source-entry",
-		Date:      "2026-06-01",
-		Memo:      "Legacy source-tagged entry",
-		Source:    "legacy_export",
-		SourceKey: "legacy-1",
+		ID:           "jrnl:legacy-source-entry",
+		Date:         "2026-06-01",
+		Memo:         "Legacy source-tagged entry",
+		ManualReason: "replay legacy source-tagged entry",
+		Source:       "legacy_export",
+		SourceKey:    "legacy-1",
 		Postings: []Posting{
 			{AccountID: cash.ID, Debit: 125000},
 			{AccountID: revenue.ID, Credit: 125000},

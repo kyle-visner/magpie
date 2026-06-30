@@ -14,6 +14,7 @@ const (
 	PermissionAuditRead      Permission = "audit:read"
 	PermissionAdminRecover   Permission = "admin:recover"
 	PermissionSettingsManage Permission = "settings:manage"
+	PermissionJournalAdjust  Permission = "journal:adjust"
 )
 
 type Role struct {
@@ -34,6 +35,34 @@ const (
 	AccountEquity    AccountType = "equity"
 	AccountRevenue   AccountType = "revenue"
 	AccountExpense   AccountType = "expense"
+)
+
+type AccountRole string
+
+const (
+	AccountRoleOperatingCash           AccountRole = "operating_cash"
+	AccountRoleBankAccount             AccountRole = "bank_account"
+	AccountRoleAccountsReceivable      AccountRole = "accounts_receivable"
+	AccountRoleUndepositedFunds        AccountRole = "undeposited_funds"
+	AccountRoleInventory               AccountRole = "inventory"
+	AccountRoleFixedAsset              AccountRole = "fixed_asset"
+	AccountRoleAccumulatedDepreciation AccountRole = "accumulated_depreciation"
+	AccountRoleAccountsPayable         AccountRole = "accounts_payable"
+	AccountRoleSalesTaxPayable         AccountRole = "sales_tax_payable"
+	AccountRolePayrollTaxPayable       AccountRole = "payroll_tax_payable"
+	AccountRoleLoanPrincipal           AccountRole = "loan_principal"
+	AccountRoleOwnerContribution       AccountRole = "owner_contribution"
+	AccountRoleOwnerDraw               AccountRole = "owner_draw"
+	AccountRoleRetainedEarnings        AccountRole = "retained_earnings"
+	AccountRoleOpeningBalanceEquity    AccountRole = "opening_balance_equity"
+	AccountRoleDefaultServiceRevenue   AccountRole = "default_service_revenue"
+	AccountRoleDefaultProductRevenue   AccountRole = "default_product_revenue"
+	AccountRoleOtherIncome             AccountRole = "other_income"
+	AccountRoleDefaultExpense          AccountRole = "default_expense"
+	AccountRoleMerchantFeesExpense     AccountRole = "merchant_fees_expense"
+	AccountRoleInterestExpense         AccountRole = "interest_expense"
+	AccountRolePayrollExpense          AccountRole = "payroll_expense"
+	AccountRoleDepreciationExpense     AccountRole = "depreciation_expense"
 )
 
 type AccountingBasis string
@@ -63,11 +92,22 @@ type BookSettings struct {
 	UpdatedBy          string             `json:"updated_by,omitempty"`
 }
 
+type JournalOrigin string
+
+const (
+	JournalOriginWorkflow         JournalOrigin = "workflow"
+	JournalOriginManualAdjustment JournalOrigin = "manual_adjustment"
+	JournalOriginMigration        JournalOrigin = "migration"
+	JournalOriginOpeningBalance   JournalOrigin = "opening_balance"
+	JournalOriginSystem           JournalOrigin = "system"
+)
+
 type Account struct {
 	ID           string              `json:"id"`
 	Number       string              `json:"number,omitempty"`
 	Name         string              `json:"name"`
 	Type         AccountType         `json:"type"`
+	Role         AccountRole         `json:"role,omitempty"`
 	Sensitivity  string              `json:"sensitivity"`
 	ExternalRefs []ExternalSourceRef `json:"external_refs,omitempty"`
 	CreatedAt    time.Time           `json:"created_at"`
@@ -91,16 +131,23 @@ type Posting struct {
 }
 
 type JournalEntry struct {
-	ID              string            `json:"id"`
-	Date            string            `json:"date"`
-	Memo            string            `json:"memo"`
-	AccountingBasis AccountingBasis   `json:"accounting_basis,omitempty"`
-	Postings        []Posting         `json:"postings"`
-	Source          string            `json:"source,omitempty"`
-	SourceKey       string            `json:"source_key,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
-	CreatedAt       time.Time         `json:"created_at"`
-	CreatedBy       string            `json:"created_by"`
+	ID                 string            `json:"id"`
+	Date               string            `json:"date"`
+	Memo               string            `json:"memo"`
+	AccountingBasis    AccountingBasis   `json:"accounting_basis,omitempty"`
+	Origin             JournalOrigin     `json:"origin,omitempty"`
+	Workflow           string            `json:"workflow,omitempty"`
+	PostingSemantics   string            `json:"posting_semantics,omitempty"`
+	SourceDocumentType string            `json:"source_document_type,omitempty"`
+	SourceDocumentID   string            `json:"source_document_id,omitempty"`
+	ManualReason       string            `json:"manual_reason,omitempty"`
+	Postings           []Posting         `json:"postings"`
+	Source             string            `json:"source,omitempty"`
+	SourceKey          string            `json:"source_key,omitempty"`
+	Metadata           map[string]string `json:"metadata,omitempty"`
+	GeneratedBy        string            `json:"generated_by,omitempty"`
+	CreatedAt          time.Time         `json:"created_at"`
+	CreatedBy          string            `json:"created_by"`
 }
 
 type Note struct {

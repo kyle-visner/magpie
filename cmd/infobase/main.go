@@ -194,6 +194,7 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 		number := fs.String("number", "", "chart of accounts number")
 		name := fs.String("name", "", "account name")
 		typ := fs.String("type", "", "asset|liability|equity|revenue|expense")
+		role := fs.String("role", "", "account role, such as bank_account or accounts_receivable")
 		sensitivity := fs.String("sensitivity", "internal", "sensitivity label")
 		externalSource := fs.String("external-source", "", "external source system, such as mercury")
 		externalID := fs.String("external-id", "", "external source id")
@@ -217,6 +218,7 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 			Number:       *number,
 			Name:         *name,
 			Type:         infobase.AccountType(*typ),
+			Role:         infobase.AccountRole(*role),
 			Sensitivity:  *sensitivity,
 			ExternalRefs: externalRefs,
 		})
@@ -241,6 +243,8 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 		return writeJSON(out, map[string]any{"root": root, "account": acct})
 	case "number":
 		return a.ledgerAccountNumber(args[1:], out)
+	case "role":
+		return a.ledgerAccountRole(args[1:], out)
 	case "external-ref":
 		return a.ledgerAccountExternalRef(args[1:], out)
 	case "list":
@@ -254,6 +258,30 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 		return writeJSON(out, st.Accounts)
 	default:
 		return fmt.Errorf("unknown ledger account command %q", args[0])
+	}
+}
+
+func (a app) ledgerAccountRole(args []string, out io.Writer) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: ledger account role set --account-id ACCOUNT_ID --role ROLE")
+	}
+	switch args[0] {
+	case "list":
+		return writeJSON(out, infobase.AccountRoleNames())
+	case "set":
+		fs := newFlagSet("ledger account role set")
+		accountID := fs.String("account-id", "", "InfoBase account id")
+		role := fs.String("role", "", "account role")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		account, root, err := a.store.SetAccountRole(a.ctx, *accountID, infobase.AccountRole(*role))
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "account": account})
+	default:
+		return fmt.Errorf("usage: ledger account role set --account-id ACCOUNT_ID --role ROLE")
 	}
 }
 
@@ -418,9 +446,11 @@ Commands:
   rbac permissions
   rbac role set --name NAME --permissions p1,p2
   rbac user set --id ID --role ROLE
-  ledger account create --name NAME --type TYPE [--number NUMBER]
+  ledger account create --name NAME --type TYPE [--number NUMBER] [--role ROLE]
   ledger account create-json --file account.json
   ledger account number set --account-id ID --number NUMBER
+  ledger account role list
+  ledger account role set --account-id ID --role ROLE
   ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID
   ledger account list
   ledger journal create --file entry.json

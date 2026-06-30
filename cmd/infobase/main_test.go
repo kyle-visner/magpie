@@ -49,7 +49,7 @@ func TestCLICreatesAccountAndJournalFromJSON(t *testing.T) {
 	}
 	revenueID := extractNestedString(t, out.Bytes(), "account", "id")
 	entryPath := filepath.Join(dir, "entry.json")
-	entry := `{"date":"2026-06-28","memo":"Paid invoice","postings":[{"account_id":"` + cashID + `","debit_cents":5000},{"account_id":"` + revenueID + `","credit_cents":5000}]}`
+	entry := `{"date":"2026-06-28","memo":"Paid invoice","manual_reason":"manual test entry","postings":[{"account_id":"` + cashID + `","debit_cents":5000},{"account_id":"` + revenueID + `","credit_cents":5000}]}`
 	if err := os.WriteFile(entryPath, []byte(entry), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +150,63 @@ func TestCLICreatesAndUpdatesAccountNumber(t *testing.T) {
 	}
 }
 
+func TestCLICreatesAndUpdatesAccountRole(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--number", "1010",
+		"--name", "Operating Bank",
+		"--type", "asset",
+		"--role", "bank_account",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	account := decoded["account"].(map[string]any)
+	accountID := account["id"].(string)
+	if account["role"] != "bank_account" {
+		t.Fatalf("expected account role in create response: %#v", account)
+	}
+
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "role", "set",
+		"--account-id", accountID,
+		"--role", "operating_cash",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	account = decoded["account"].(map[string]any)
+	if account["role"] != "operating_cash" {
+		t.Fatalf("expected updated account role: %#v", account)
+	}
+
+	out.Reset()
+	if err := run([]string{"--store", dir, "ledger", "account", "role", "list"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var roles []string
+	if err := json.Unmarshal(out.Bytes(), &roles); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles) == 0 || roles[0] == "" {
+		t.Fatalf("expected account roles list, got %#v", roles)
+	}
+}
+
 func TestCLIConfiguresAccountingBasisAndStampsJournalEntries(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
@@ -180,7 +237,7 @@ func TestCLIConfiguresAccountingBasisAndStampsJournalEntries(t *testing.T) {
 	}
 	revenueID := extractNestedString(t, out.Bytes(), "account", "id")
 	entryPath := filepath.Join(dir, "modified-cash-entry.json")
-	entry := `{"date":"2026-06-28","memo":"Paid invoice under modified cash","postings":[{"account_id":"` + cashID + `","debit_cents":5000},{"account_id":"` + revenueID + `","credit_cents":5000}]}`
+	entry := `{"date":"2026-06-28","memo":"Paid invoice under modified cash","manual_reason":"manual modified cash test entry","postings":[{"account_id":"` + cashID + `","debit_cents":5000},{"account_id":"` + revenueID + `","credit_cents":5000}]}`
 	if err := os.WriteFile(entryPath, []byte(entry), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -194,6 +251,9 @@ func TestCLIConfiguresAccountingBasisAndStampsJournalEntries(t *testing.T) {
 	created := decoded["entry"].(map[string]any)
 	if created["accounting_basis"] != "modified_cash" {
 		t.Fatalf("expected stamped journal accounting basis, got %#v", created)
+	}
+	if created["origin"] != "manual_adjustment" {
+		t.Fatalf("expected manual journal origin, got %#v", created)
 	}
 
 	out.Reset()

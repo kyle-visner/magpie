@@ -318,6 +318,12 @@ func (s *Store) applyNode(st *State, node Node) error {
 		if ev.Entry.AccountingBasis == "" {
 			ev.Entry.AccountingBasis = st.effectiveSettings().AccountingBasis
 		}
+		if ev.Entry.Origin == "" {
+			ev.Entry.Origin = JournalOriginManualAdjustment
+		}
+		if _, err := normalizeJournalOrigin(ev.Entry.Origin); err != nil {
+			return err
+		}
 		st.JournalEntries[ev.Entry.ID] = ev.Entry
 		if ev.SourceKey != "" {
 			st.SourceKeys[ev.SourceKey] = ev.Entry.ID
