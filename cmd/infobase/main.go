@@ -77,6 +77,10 @@ func run(args []string, out io.Writer) error {
 		return a.rbac(rest[1:], out)
 	case "book":
 		return a.book(rest[1:], out)
+	case "customer":
+		return a.customer(rest[1:], out)
+	case "invoice":
+		return a.invoice(rest[1:], out)
 	case "ledger":
 		return a.ledger(rest[1:], out)
 	case "note":
@@ -85,6 +89,109 @@ func run(args []string, out io.Writer) error {
 		return a.snapshot(rest[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q", rest[0])
+	}
+}
+
+func (a app) customer(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("customer command required")
+	}
+	switch args[0] {
+	case "create-json":
+		fs := newFlagSet("customer create-json")
+		file := fs.String("file", "", "JSON file with a customer; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var customer infobase.Customer
+		if err := readJSONFile(*file, &customer); err != nil {
+			return err
+		}
+		created, root, err := a.store.UpsertCustomer(a.ctx, customer)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "customer": created})
+	case "list":
+		st, err := a.store.LoadState()
+		if err != nil {
+			return err
+		}
+		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionLedgerRead); err != nil {
+			return err
+		}
+		return writeJSON(out, st.Customers)
+	default:
+		return fmt.Errorf("unknown customer command %q", args[0])
+	}
+}
+
+func (a app) invoice(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("invoice command required")
+	}
+	switch args[0] {
+	case "create-json":
+		fs := newFlagSet("invoice create-json")
+		file := fs.String("file", "", "JSON file with an invoice; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var invoice infobase.Invoice
+		if err := readJSONFile(*file, &invoice); err != nil {
+			return err
+		}
+		created, root, err := a.store.CreateInvoice(a.ctx, invoice)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": created})
+	case "post":
+		fs := newFlagSet("invoice post")
+		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		invoice, root, err := a.store.PostInvoice(a.ctx, *invoiceID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
+	case "mark-paid":
+		fs := newFlagSet("invoice mark-paid")
+		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		cashAccountID := fs.String("cash-account-id", "", "cash or bank account id")
+		date := fs.String("paid-date", "", "payment date YYYY-MM-DD")
+		amount := fs.Int64("amount-cents", 0, "payment amount in cents")
+		externalSource := fs.String("external-source", "", "external payment source")
+		externalID := fs.String("external-id", "", "external payment id")
+		paymentEvidence := fs.String("payment-evidence", "", "payment evidence provenance")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		invoice, root, err := a.store.MarkInvoicePaid(a.ctx, *invoiceID, infobase.InvoicePaymentRequest{
+			Date:            *date,
+			AmountCents:     *amount,
+			CashAccountID:   *cashAccountID,
+			ExternalSource:  *externalSource,
+			ExternalID:      *externalID,
+			PaymentEvidence: *paymentEvidence,
+		})
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
+	case "list":
+		st, err := a.store.LoadState()
+		if err != nil {
+			return err
+		}
+		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionLedgerRead); err != nil {
+			return err
+		}
+		return writeJSON(out, st.Invoices)
+	default:
+		return fmt.Errorf("unknown invoice command %q", args[0])
 	}
 }
 
@@ -443,6 +550,12 @@ Commands:
   audit
   book settings get
   book settings set --accounting-basis cash|modified_cash|accrual
+  customer create-json --file customer.json
+  customer list
+  invoice create-json --file invoice.json
+  invoice post --invoice-id ID
+  invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
+  invoice list
   rbac permissions
   rbac role set --name NAME --permissions p1,p2
   rbac user set --id ID --role ROLE

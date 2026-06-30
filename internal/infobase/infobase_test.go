@@ -31,6 +31,21 @@ func mustAccount(t *testing.T, s *Store, ctx Context, name string, typ AccountTy
 	return acct
 }
 
+func mustRoleAccount(t *testing.T, s *Store, ctx Context, number, name string, typ AccountType, role AccountRole) Account {
+	t.Helper()
+	acct, _, err := s.CreateAccountWithDetails(ctx, Account{
+		Number:      number,
+		Name:        name,
+		Type:        typ,
+		Role:        role,
+		Sensitivity: "confidential",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return acct
+}
+
 func TestLedgerRequiresBalancedJournalEntries(t *testing.T) {
 	s, ctx := newTestStore(t)
 	cash := mustAccount(t, s, ctx, "Checking", AccountAsset)
@@ -402,6 +417,291 @@ func TestManualJournalRequiresJournalAdjustAndReason(t *testing.T) {
 		created.GeneratedBy != "owner" {
 		t.Fatalf("unexpected manual journal metadata: %#v", created)
 	}
+}
+
+func TestCashBasisInvoicePaidGeneratesRevenueAndTaxWorkflowJournal(t *testing.T) {
+	s, ctx := newTestStore(t)
+	cash := mustRoleAccount(t, s, ctx, "1010", "Operating Bank", AccountAsset, AccountRoleOperatingCash)
+	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	tax := mustRoleAccount(t, s, ctx, "2100", "Sales Tax Payable", AccountLiability, AccountRoleSalesTaxPayable)
+	customer, _, err := s.UpsertCustomer(ctx, Customer{Name: "Acme Co"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoice, _, err := s.CreateInvoice(ctx, Invoice{
+		InvoiceNumber: "INV-1001",
+		CustomerID:    customer.ID,
+		InvoiceDate:   "2026-06-01",
+		LineItems: []InvoiceLineItem{{
+			Description:      "Services",
+			RevenueAccountID: revenue.ID,
+			Quantity:         1,
+			UnitAmountCents:  100000,
+			AmountCents:      100000,
+		}},
+		SubtotalCents:  100000,
+		TaxAmountCents: 8500,
+		TotalCents:     108500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	posted, root, err := s.PostInvoice(ctx, invoice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if posted.Status != SourceDocumentOpen || posted.IssuedJournalEntryID != "" {
+		t.Fatalf("cash-basis post should open invoice without A/R journal: %#v", posted)
+	}
+	postedAgain, rootAgain, err := s.PostInvoice(ctx, invoice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if postedAgain.ID != posted.ID || rootAgain != root {
+		t.Fatalf("expected invoice post idempotency, got invoice=%s root=%s", postedAgain.ID, rootAgain)
+	}
+
+	paid, _, err := s.MarkInvoicePaid(ctx, invoice.ID, InvoicePaymentRequest{
+		Date:            "2026-06-15",
+		AmountCents:     108500,
+		CashAccountID:   cash.ID,
+		ExternalSource:  "mercury",
+		ExternalID:      "payment-1001",
+		PaymentEvidence: "mercury_invoice_status",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paid.Status != SourceDocumentPaid || len(paid.PaymentJournalEntryIDs) != 1 {
+		t.Fatalf("expected paid invoice with payment journal: %#v", paid)
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := st.JournalEntries[paid.PaymentJournalEntryIDs[0]]
+	if entry.Origin != JournalOriginWorkflow ||
+		entry.Workflow != "invoice.mark_paid" ||
+		entry.PostingSemantics != "invoice_paid" ||
+		entry.AccountingBasis != AccountingBasisCash ||
+		entry.SourceDocumentID != invoice.ID {
+		t.Fatalf("unexpected workflow metadata: %#v", entry)
+	}
+	assertPosting(t, entry, cash.ID, 108500, 0)
+	assertPosting(t, entry, revenue.ID, 0, 100000)
+	assertPosting(t, entry, tax.ID, 0, 8500)
+}
+
+func TestAccrualInvoicePostAndPaymentUseAccountsReceivable(t *testing.T) {
+	s, ctx := newTestStore(t)
+	if _, _, err := s.SetAccountingBasis(ctx, AccountingBasisAccrual); err != nil {
+		t.Fatal(err)
+	}
+	cash := mustRoleAccount(t, s, ctx, "1010", "Operating Bank", AccountAsset, AccountRoleOperatingCash)
+	ar := mustRoleAccount(t, s, ctx, "1100", "Accounts Receivable", AccountAsset, AccountRoleAccountsReceivable)
+	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	tax := mustRoleAccount(t, s, ctx, "2100", "Sales Tax Payable", AccountLiability, AccountRoleSalesTaxPayable)
+	customer, _, err := s.UpsertCustomer(ctx, Customer{Name: "Globex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoice, _, err := s.CreateInvoice(ctx, Invoice{
+		InvoiceNumber: "INV-2001",
+		CustomerID:    customer.ID,
+		InvoiceDate:   "2026-06-01",
+		LineItems: []InvoiceLineItem{{
+			Description:      "Services",
+			RevenueAccountID: revenue.ID,
+			Quantity:         2,
+			UnitAmountCents:  50000,
+			AmountCents:      100000,
+		}},
+		SubtotalCents:  100000,
+		TaxAmountCents: 8500,
+		TotalCents:     108500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	posted, _, err := s.PostInvoice(ctx, invoice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if posted.IssuedJournalEntryID == "" {
+		t.Fatalf("expected accrual invoice issue journal: %#v", posted)
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued := st.JournalEntries[posted.IssuedJournalEntryID]
+	assertPosting(t, issued, ar.ID, 108500, 0)
+	assertPosting(t, issued, revenue.ID, 0, 100000)
+	assertPosting(t, issued, tax.ID, 0, 8500)
+
+	paid, _, err := s.MarkInvoicePaid(ctx, invoice.ID, InvoicePaymentRequest{
+		Date:          "2026-06-15",
+		AmountCents:   108500,
+		CashAccountID: cash.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err = s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payment := st.JournalEntries[paid.PaymentJournalEntryIDs[0]]
+	if payment.AccountingBasis != AccountingBasisAccrual || payment.Workflow != "invoice.mark_paid" {
+		t.Fatalf("unexpected payment journal metadata: %#v", payment)
+	}
+	assertPosting(t, payment, cash.ID, 108500, 0)
+	assertPosting(t, payment, ar.ID, 0, 108500)
+}
+
+func TestModifiedCashInvoicePaidTracksTaxWithoutAccountsReceivable(t *testing.T) {
+	s, ctx := newTestStore(t)
+	if _, _, err := s.SetAccountingBasis(ctx, AccountingBasisModifiedCash); err != nil {
+		t.Fatal(err)
+	}
+	cash := mustRoleAccount(t, s, ctx, "1010", "Operating Bank", AccountAsset, AccountRoleOperatingCash)
+	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	tax := mustRoleAccount(t, s, ctx, "2100", "Sales Tax Payable", AccountLiability, AccountRoleSalesTaxPayable)
+	customer, _, err := s.UpsertCustomer(ctx, Customer{Name: "Modified Cash Customer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoice, _, err := s.CreateInvoice(ctx, Invoice{
+		InvoiceNumber: "INV-MC-1",
+		CustomerID:    customer.ID,
+		InvoiceDate:   "2026-06-01",
+		LineItems: []InvoiceLineItem{{
+			Description:      "Services",
+			RevenueAccountID: revenue.ID,
+			Quantity:         1,
+			UnitAmountCents:  100000,
+			AmountCents:      100000,
+		}},
+		SubtotalCents:  100000,
+		TaxAmountCents: 8500,
+		TotalCents:     108500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	posted, _, err := s.PostInvoice(ctx, invoice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if posted.IssuedJournalEntryID != "" {
+		t.Fatalf("modified cash post should not create A/R issue journal: %#v", posted)
+	}
+	paid, _, err := s.MarkInvoicePaid(ctx, invoice.ID, InvoicePaymentRequest{
+		Date:          "2026-06-15",
+		AmountCents:   108500,
+		CashAccountID: cash.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := st.JournalEntries[paid.PaymentJournalEntryIDs[0]]
+	if entry.AccountingBasis != AccountingBasisModifiedCash {
+		t.Fatalf("expected modified cash workflow journal, got %#v", entry)
+	}
+	assertPosting(t, entry, cash.ID, 108500, 0)
+	assertPosting(t, entry, revenue.ID, 0, 100000)
+	assertPosting(t, entry, tax.ID, 0, 8500)
+	for _, posting := range entry.Postings {
+		if account := st.Accounts[posting.AccountID]; account.Role == AccountRoleAccountsReceivable {
+			t.Fatalf("modified cash invoice should not post to A/R: %#v", entry.Postings)
+		}
+	}
+}
+
+func TestBookkeepingAgentCanUseInvoiceWorkflowButNotManualJournal(t *testing.T) {
+	s, owner := newTestStore(t)
+	if _, err := s.UpsertRole(owner, Role{
+		Name: "Bookkeeping Agent",
+		Permissions: []Permission{
+			PermissionLedgerRead,
+			PermissionLedgerWrite,
+			PermissionAuditRead,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertUser(owner, User{ID: "bookkeeper", Role: "Bookkeeping Agent"}); err != nil {
+		t.Fatal(err)
+	}
+	cash := mustRoleAccount(t, s, owner, "1010", "Operating Bank", AccountAsset, AccountRoleOperatingCash)
+	revenue := mustRoleAccount(t, s, owner, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	customer, _, err := s.UpsertCustomer(owner, Customer{Name: "Agent Customer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bookkeeper := Context{Actor: "bookkeeper"}
+	invoice, _, err := s.CreateInvoice(bookkeeper, Invoice{
+		InvoiceNumber: "INV-3001",
+		CustomerID:    customer.ID,
+		InvoiceDate:   "2026-06-01",
+		LineItems: []InvoiceLineItem{{
+			Description:      "Services",
+			RevenueAccountID: revenue.ID,
+			Quantity:         1,
+			UnitAmountCents:  100000,
+			AmountCents:      100000,
+		}},
+		SubtotalCents: 100000,
+		TotalCents:    100000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PostInvoice(bookkeeper, invoice.ID); err != nil {
+		t.Fatal(err)
+	}
+	paid, _, err := s.MarkInvoicePaid(bookkeeper, invoice.ID, InvoicePaymentRequest{
+		Date:          "2026-06-15",
+		AmountCents:   100000,
+		CashAccountID: cash.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paid.Status != SourceDocumentPaid {
+		t.Fatalf("expected bookkeeping agent to use invoice workflow: %#v", paid)
+	}
+
+	_, _, err = s.CreateJournalEntry(bookkeeper, JournalEntry{
+		Date:         "2026-06-15",
+		Memo:         "Manual bypass",
+		ManualReason: "should not be allowed",
+		Postings: []Posting{
+			{AccountID: cash.ID, Debit: 100000},
+			{AccountID: revenue.ID, Credit: 100000},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected manual journal to remain denied")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrPermission {
+		t.Fatalf("expected permission error, got %#v", err)
+	}
+}
+
+func assertPosting(t *testing.T, entry JournalEntry, accountID string, debit int64, credit int64) {
+	t.Helper()
+	for _, posting := range entry.Postings {
+		if posting.AccountID == accountID && posting.Debit == debit && posting.Credit == credit {
+			return
+		}
+	}
+	t.Fatalf("expected posting account=%s debit=%d credit=%d in %#v", accountID, debit, credit, entry.Postings)
 }
 
 func TestAccountExternalRefsAreStructuredAndUnique(t *testing.T) {

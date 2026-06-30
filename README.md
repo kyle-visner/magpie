@@ -14,6 +14,7 @@ It is built around one rule: agents and humans use the same CLI, and the CLI enf
 - Book-level accounting basis support for cash, modified cash, and accrual accounting.
 - Chart account roles for workflow-safe account selection.
 - Privileged manual journal adjustments with required audit reasons.
+- First-class customer and invoice workflows that generate basis-aware journals.
 - Structured external source references on ledger accounts.
 - Markdown note create, update, list, and get operations.
 - Source-tagged journal entries for agent-mapped exports from QuickBooks or other systems.
@@ -68,6 +69,7 @@ Operational rules for agents:
 - Read `book settings get` before posting financial activity.
 - Use the active `accounting_basis` for the whole book; do not choose cash, modified cash, or accrual per transaction.
 - Use account roles rather than account names or numbers when deciding what an account means.
+- Use `invoice create-json`, `invoice post`, and `invoice mark-paid` for customer invoice activity.
 - Do not use generic `ledger journal create` for ordinary operating activity. It is a privileged manual adjustment/import path.
 - Use `note put --body-file FILE` for long note bodies to avoid shell quoting issues.
 - Create a `snapshot create --name NAME` before large agent workflows.
@@ -202,7 +204,7 @@ For vendor bills:
 - Cash or modified cash: expense when paid, except for explicit modified-cash balance-sheet items such as fixed assets, loans, and taxes.
 - Accrual: on bill, debit expense or asset and credit accounts payable; on payment, debit accounts payable and credit cash.
 
-InfoBase currently prevents ordinary agents from bypassing these rules with generic manual journals. The upcoming invoice workflow must enforce the A/R versus cash-basis posting semantics directly.
+InfoBase prevents ordinary agents from bypassing these rules with generic manual journals, and invoice workflows enforce the A/R versus cash-basis posting semantics directly.
 
 ## Ledger Workflow
 
@@ -371,6 +373,112 @@ Validation rules:
 - `metadata.last_four`, when present, must contain exactly four digits.
 - The pair `source_system + external_id` must be unique across ledger accounts.
 
+## Customer And Invoice Workflow
+
+Invoices are first-class source documents. Agents should create customers and invoices, then let InfoBase generate workflow-originated journal entries according to the active accounting basis.
+
+Minimum account roles for service invoices:
+
+- `operating_cash` or `bank_account` for the payment/deposit account.
+- `default_service_revenue` or another revenue account on each invoice line.
+- `sales_tax_payable` when the invoice includes sales tax.
+- `accounts_receivable` when the book uses `accrual`.
+
+Create or update a customer:
+
+```json
+{
+  "name": "Acme Co",
+  "external_refs": [
+    {
+      "source_system": "mercury",
+      "external_id": "customer-123",
+      "external_type": "customer",
+      "display_name": "Acme Co"
+    }
+  ]
+}
+```
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent customer create-json \
+  --file ./customer.json
+```
+
+Create an invoice:
+
+```json
+{
+  "invoice_number": "INV-1001",
+  "customer_id": "cust:ACME_ID",
+  "invoice_date": "2026-06-01",
+  "due_date": "2026-06-30",
+  "line_items": [
+    {
+      "description": "Services",
+      "revenue_account_id": "acct:SERVICE_REVENUE_ID",
+      "quantity": 1,
+      "unit_amount_cents": 100000,
+      "amount_cents": 100000
+    }
+  ],
+  "subtotal_cents": 100000,
+  "tax_amount_cents": 8500,
+  "total_cents": 108500,
+  "external_refs": [
+    {
+      "source_system": "mercury",
+      "external_id": "invoice-1001",
+      "external_type": "invoice"
+    }
+  ]
+}
+```
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent invoice create-json \
+  --file ./invoice.json
+```
+
+Post the invoice:
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent invoice post \
+  --invoice-id inv:...
+```
+
+Posting behavior:
+
+- `cash` and `modified_cash`: opens the invoice but does not create A/R or revenue journals yet.
+- `accrual`: creates a workflow journal for invoice issue: debit `accounts_receivable`, credit revenue, and credit `sales_tax_payable` when tax is present.
+
+Mark the invoice paid:
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent invoice mark-paid \
+  --invoice-id inv:... \
+  --cash-account-id acct:OPERATING_CASH_ID \
+  --paid-date 2026-06-15 \
+  --amount-cents 108500 \
+  --external-source mercury \
+  --external-id mercury-payment-123 \
+  --payment-evidence mercury_invoice_status
+```
+
+Payment behavior:
+
+- `cash` and `modified_cash`: creates a workflow journal that debits cash, credits revenue, and credits `sales_tax_payable` when tax is present. A/R is not used.
+- `accrual`: requires the invoice to be posted first, then creates a workflow journal that debits cash and credits `accounts_receivable`.
+
+Workflow journals are stored with `origin: "workflow"`, `workflow`, `posting_semantics`, `source_document_type`, and `source_document_id`. Invoice workflow writes are idempotent by source key so agents can retry safely.
+
+List source documents:
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent customer list
+./infobase --store .infobase --actor bookkeeping-agent invoice list
+```
+
 ## Manual Journal Adjustments
 
 Generic journal creation is restricted. It requires both `ledger:write` and `journal:adjust`, and it must include a `manual_reason`. Default `Owner` and `Admin` roles have `journal:adjust`; ordinary bookkeeping agents should not.
@@ -500,6 +608,12 @@ state
 audit
 book settings get
 book settings set --accounting-basis cash|modified_cash|accrual
+customer create-json --file customer.json
+customer list
+invoice create-json --file invoice.json
+invoice post --invoice-id ID
+invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
+invoice list
 rbac permissions
 rbac role set --name NAME --permissions p1,p2
 rbac user set --id ID --role ROLE

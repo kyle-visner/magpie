@@ -328,6 +328,27 @@ func (s *Store) applyNode(st *State, node Node) error {
 		if ev.SourceKey != "" {
 			st.SourceKeys[ev.SourceKey] = ev.Entry.ID
 		}
+	case "customer.upsert":
+		var ev customerUpsertPayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return err
+		}
+		st.Customers[ev.Customer.ID] = ev.Customer
+	case "invoice.create":
+		var ev invoiceCreatePayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return err
+		}
+		st.Invoices[ev.Invoice.ID] = ev.Invoice
+	case "invoice.update":
+		var ev invoiceUpdatePayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return err
+		}
+		if _, ok := st.Invoices[ev.Invoice.ID]; !ok {
+			return appErr(ErrValidation, "invoice.update references unknown invoice %s", ev.Invoice.ID)
+		}
+		st.Invoices[ev.Invoice.ID] = ev.Invoice
 	case "settings.update":
 		var ev settingsUpdatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
