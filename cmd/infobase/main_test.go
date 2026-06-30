@@ -107,6 +107,49 @@ func TestCLICreatesAccountWithExternalRefMetadata(t *testing.T) {
 	}
 }
 
+func TestCLICreatesAndUpdatesAccountNumber(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--number", "1000",
+		"--name", "Operating Bank",
+		"--type", "asset",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	account := decoded["account"].(map[string]any)
+	accountID := account["id"].(string)
+	if account["number"] != "1000" {
+		t.Fatalf("expected account number in create response: %#v", account)
+	}
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "number", "set",
+		"--account-id", accountID,
+		"--number", "1010",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	account = decoded["account"].(map[string]any)
+	if account["number"] != "1010" {
+		t.Fatalf("expected updated account number: %#v", account)
+	}
+}
+
 func TestCLIUpdatesExistingAccountExternalRefMetadata(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer

@@ -37,6 +37,7 @@ const (
 
 type Account struct {
 	ID           string              `json:"id"`
+	Number       string              `json:"number,omitempty"`
 	Name         string              `json:"name"`
 	Type         AccountType         `json:"type"`
 	Sensitivity  string              `json:"sensitivity"`

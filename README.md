@@ -157,13 +157,31 @@ Create accounts as an actor with `ledger:write`:
 
 ```sh
 ./infobase --store .infobase --actor owner ledger account create \
+  --number 1000 \
   --name Checking \
   --type asset
 
 ./infobase --store .infobase --actor owner ledger account create \
+  --number 4000 \
   --name "Consulting Revenue" \
   --type revenue
 ```
+
+Account numbers are optional but first-class. They are stored separately from account IDs, so journal entries continue to reference stable `acct:...` IDs even if an account is renumbered.
+
+Renumber an existing account:
+
+```sh
+./infobase --store .infobase --actor owner ledger account number set \
+  --account-id acct:CHECKING_ID \
+  --number 1010
+```
+
+Account number rules:
+
+- Numbers must be unique across accounts when present.
+- Numbers may contain digits, hyphens, and dots, e.g. `1000`, `1010.01`, `2000-10`.
+- Renumbering creates a versioned account update event.
 
 List accounts and capture the generated account IDs:
 
@@ -179,6 +197,7 @@ Example Mercury account:
 
 ```sh
 ./infobase --store .infobase --actor owner ledger account create \
+  --number 1010 \
   --name "Mercury Checking ****1234" \
   --type asset \
   --sensitivity confidential \
@@ -197,6 +216,7 @@ Stored account JSON includes:
 
 ```json
 {
+  "number": "1010",
   "external_refs": [
     {
       "source_system": "mercury",
@@ -219,6 +239,7 @@ Example non-bank chart account mapping:
 
 ```json
 {
+  "number": "2300",
   "name": "Sales Tax Payable",
   "type": "liability",
   "sensitivity": "confidential",
@@ -380,8 +401,9 @@ audit
 rbac permissions
 rbac role set --name NAME --permissions p1,p2
 rbac user set --id ID --role ROLE
-ledger account create --name NAME --type TYPE [--external-source SOURCE --external-id ID]
+ledger account create --name NAME --type TYPE [--number NUMBER]
 ledger account create-json --file account.json
+ledger account number set --account-id ID --number NUMBER
 ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID
 ledger account list
 ledger journal create --file entry.json
