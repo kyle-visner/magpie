@@ -151,6 +151,72 @@ func TestAccountExternalRefsAreStructuredAndUnique(t *testing.T) {
 	}
 }
 
+func TestAccountNumbersAreStructuredUniqueAndUpdatable(t *testing.T) {
+	s, ctx := newTestStore(t)
+	acct, _, err := s.CreateAccountWithDetails(ctx, Account{
+		Number:      "1000",
+		Name:        "Operating Bank",
+		Type:        AccountAsset,
+		Sensitivity: "confidential",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct.Number != "1000" {
+		t.Fatalf("expected account number to be stored, got %#v", acct)
+	}
+
+	updated, _, err := s.SetAccountNumber(ctx, acct.ID, "1010.01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Number != "1010.01" {
+		t.Fatalf("expected updated account number, got %#v", updated)
+	}
+
+	_, _, err = s.CreateAccountWithDetails(ctx, Account{
+		Number:      "1010.01",
+		Name:        "Duplicate Number",
+		Type:        AccountAsset,
+		Sensitivity: "confidential",
+	})
+	if err == nil {
+		t.Fatal("expected duplicate account number to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrConflict {
+		t.Fatalf("expected duplicate number conflict, got %#v", err)
+	}
+
+	_, _, err = s.CreateAccountWithDetails(ctx, Account{
+		Number:      "10 A",
+		Name:        "Invalid Number",
+		Type:        AccountAsset,
+		Sensitivity: "confidential",
+	})
+	if err == nil {
+		t.Fatal("expected invalid account number to fail")
+	}
+	if !errors.As(err, &app) || app.Code != ErrValidation {
+		t.Fatalf("expected invalid number validation error, got %#v", err)
+	}
+
+	nodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawUpdate bool
+	for _, node := range nodes {
+		if node.Type == "ledger.account" && node.Command == "ledger account number set" {
+			sawUpdate = true
+			break
+		}
+	}
+	if !sawUpdate {
+		t.Fatal("expected account number update to be versioned in audit log")
+	}
+}
+
 func TestAccountExternalRefCanBeAddedAndUpdatedAfterCreation(t *testing.T) {
 	s, ctx := newTestStore(t)
 	account := mustAccount(t, s, ctx, "Operating Bank", AccountAsset)

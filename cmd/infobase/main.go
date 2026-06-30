@@ -150,6 +150,7 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 	switch args[0] {
 	case "create":
 		fs := newFlagSet("ledger account create")
+		number := fs.String("number", "", "chart of accounts number")
 		name := fs.String("name", "", "account name")
 		typ := fs.String("type", "", "asset|liability|equity|revenue|expense")
 		sensitivity := fs.String("sensitivity", "internal", "sensitivity label")
@@ -171,7 +172,13 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 			URL:          *externalURL,
 			Metadata:     externalMetadata,
 		}}
-		acct, root, err := a.store.CreateAccountWithExternalRefs(a.ctx, *name, infobase.AccountType(*typ), *sensitivity, externalRefs)
+		acct, root, err := a.store.CreateAccountWithDetails(a.ctx, infobase.Account{
+			Number:       *number,
+			Name:         *name,
+			Type:         infobase.AccountType(*typ),
+			Sensitivity:  *sensitivity,
+			ExternalRefs: externalRefs,
+		})
 		if err != nil {
 			return err
 		}
@@ -186,11 +193,13 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 		if err := readJSONFile(*file, &account); err != nil {
 			return err
 		}
-		acct, root, err := a.store.CreateAccountWithExternalRefs(a.ctx, account.Name, account.Type, account.Sensitivity, account.ExternalRefs)
+		acct, root, err := a.store.CreateAccountWithDetails(a.ctx, account)
 		if err != nil {
 			return err
 		}
 		return writeJSON(out, map[string]any{"root": root, "account": acct})
+	case "number":
+		return a.ledgerAccountNumber(args[1:], out)
 	case "external-ref":
 		return a.ledgerAccountExternalRef(args[1:], out)
 	case "list":
@@ -205,6 +214,23 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 	default:
 		return fmt.Errorf("unknown ledger account command %q", args[0])
 	}
+}
+
+func (a app) ledgerAccountNumber(args []string, out io.Writer) error {
+	if len(args) < 1 || args[0] != "set" {
+		return fmt.Errorf("usage: ledger account number set --account-id ACCOUNT_ID --number NUMBER")
+	}
+	fs := newFlagSet("ledger account number set")
+	accountID := fs.String("account-id", "", "InfoBase account id")
+	number := fs.String("number", "", "chart of accounts number")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	account, root, err := a.store.SetAccountNumber(a.ctx, *accountID, *number)
+	if err != nil {
+		return err
+	}
+	return writeJSON(out, map[string]any{"root": root, "account": account})
 }
 
 func (a app) ledgerAccountExternalRef(args []string, out io.Writer) error {
@@ -349,8 +375,9 @@ Commands:
   rbac permissions
   rbac role set --name NAME --permissions p1,p2
   rbac user set --id ID --role ROLE
-  ledger account create --name NAME --type TYPE [--external-source SOURCE --external-id ID]
+  ledger account create --name NAME --type TYPE [--number NUMBER]
   ledger account create-json --file account.json
+  ledger account number set --account-id ID --number NUMBER
   ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID
   ledger account list
   ledger journal create --file entry.json

@@ -22,10 +22,14 @@ type journalCreatePayload struct {
 }
 
 func (s *Store) CreateAccount(ctx Context, name string, typ AccountType, sensitivity string) (Account, string, error) {
-	return s.CreateAccountWithExternalRefs(ctx, name, typ, sensitivity, nil)
+	return s.CreateAccountWithDetails(ctx, Account{Name: name, Type: typ, Sensitivity: sensitivity})
 }
 
 func (s *Store) CreateAccountWithExternalRefs(ctx Context, name string, typ AccountType, sensitivity string, externalRefs []ExternalSourceRef) (Account, string, error) {
+	return s.CreateAccountWithDetails(ctx, Account{Name: name, Type: typ, Sensitivity: sensitivity, ExternalRefs: externalRefs})
+}
+
+func (s *Store) CreateAccountWithDetails(ctx Context, account Account) (Account, string, error) {
 	st, err := s.LoadState()
 	if err != nil {
 		return Account{}, "", err
@@ -33,14 +37,24 @@ func (s *Store) CreateAccountWithExternalRefs(ctx Context, name string, typ Acco
 	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
 		return Account{}, "", err
 	}
-	name = strings.TrimSpace(name)
-	if name == "" {
+	account.ID = ""
+	account.Name = strings.TrimSpace(account.Name)
+	if account.Name == "" {
 		return Account{}, "", appErr(ErrValidation, "account name is required")
 	}
-	if err := validateAccountType(typ); err != nil {
+	if err := validateAccountType(account.Type); err != nil {
 		return Account{}, "", err
 	}
-	externalRefs, err = normalizeExternalRefs(externalRefs)
+	number, err := normalizeAccountNumber(account.Number)
+	if err != nil {
+		return Account{}, "", err
+	}
+	if number != "" {
+		if err := ensureAccountNumberAvailable(st, "", number); err != nil {
+			return Account{}, "", err
+		}
+	}
+	externalRefs, err := normalizeExternalRefs(account.ExternalRefs)
 	if err != nil {
 		return Account{}, "", err
 	}
@@ -54,17 +68,48 @@ func (s *Store) CreateAccountWithExternalRefs(ctx Context, name string, typ Acco
 			}
 		}
 	}
-	id := makeID("acct", strings.ToLower(name), string(typ))
+	id := makeID("acct", strings.ToLower(account.Name), string(account.Type))
 	if _, exists := st.Accounts[id]; exists {
 		return Account{}, "", appErr(ErrConflict, "account already exists: %s", id)
 	}
-	if sensitivity == "" {
-		sensitivity = "internal"
+	if account.Sensitivity == "" {
+		account.Sensitivity = "internal"
 	}
 	now := s.now().UTC()
-	acct := Account{ID: id, Name: name, Type: typ, Sensitivity: sensitivity, ExternalRefs: externalRefs, CreatedAt: now, CreatedBy: ctx.Actor}
+	acct := Account{ID: id, Number: number, Name: account.Name, Type: account.Type, Sensitivity: account.Sensitivity, ExternalRefs: externalRefs, CreatedAt: now, CreatedBy: ctx.Actor}
 	hash, err := s.appendEvent(ctx, "ledger.account", id, "ledger account create", wrapEvent("account.create", accountCreatePayload{Account: acct}), true)
 	return acct, hash, err
+}
+
+func (s *Store) SetAccountNumber(ctx Context, accountID string, number string) (Account, string, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return Account{}, "", err
+	}
+	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
+		return Account{}, "", err
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return Account{}, "", appErr(ErrValidation, "account id is required")
+	}
+	account, ok := st.Accounts[accountID]
+	if !ok {
+		return Account{}, "", appErr(ErrNotFound, "account %s not found", accountID)
+	}
+	normalized, err := normalizeAccountNumber(number)
+	if err != nil {
+		return Account{}, "", err
+	}
+	if normalized == "" {
+		return Account{}, "", appErr(ErrValidation, "account number is required")
+	}
+	if err := ensureAccountNumberAvailable(st, accountID, normalized); err != nil {
+		return Account{}, "", err
+	}
+	account.Number = normalized
+	hash, err := s.appendEvent(ctx, "ledger.account", account.ID, "ledger account number set", wrapEvent("account.update", accountUpdatePayload{Account: account}), true)
+	return account, hash, err
 }
 
 func (s *Store) SetAccountExternalRef(ctx Context, accountID string, ref ExternalSourceRef) (Account, string, error) {
@@ -143,6 +188,32 @@ func normalizeExternalRefs(refs []ExternalSourceRef) ([]ExternalSourceRef, error
 		return nil, nil
 	}
 	return out, nil
+}
+
+func normalizeAccountNumber(number string) (string, error) {
+	number = strings.TrimSpace(number)
+	if number == "" {
+		return "", nil
+	}
+	for _, r := range number {
+		if unicode.IsDigit(r) || r == '-' || r == '.' {
+			continue
+		}
+		return "", appErr(ErrValidation, "account number may only contain digits, hyphen, or dot")
+	}
+	return number, nil
+}
+
+func ensureAccountNumberAvailable(st State, currentAccountID string, number string) error {
+	for _, existing := range st.Accounts {
+		if existing.ID == currentAccountID {
+			continue
+		}
+		if existing.Number == number {
+			return appErr(ErrConflict, "account number %q already belongs to account %s", number, existing.ID)
+		}
+	}
+	return nil
 }
 
 func normalizeExternalRef(ref ExternalSourceRef) (ExternalSourceRef, bool, error) {
