@@ -308,6 +308,19 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 	if len(entry.Postings) < 2 {
 		return JournalEntry{}, "", appErr(ErrValidation, "journal entry requires at least two postings")
 	}
+	settings := st.effectiveSettings()
+	if entry.AccountingBasis == "" {
+		entry.AccountingBasis = settings.AccountingBasis
+	} else {
+		basis, err := normalizeAccountingBasis(entry.AccountingBasis)
+		if err != nil {
+			return JournalEntry{}, "", err
+		}
+		if basis != settings.AccountingBasis {
+			return JournalEntry{}, "", appErr(ErrValidation, "journal accounting basis %q does not match active book basis %q", basis, settings.AccountingBasis)
+		}
+		entry.AccountingBasis = basis
+	}
 	var debit, credit int64
 	for i, p := range entry.Postings {
 		if p.AccountID == "" {
@@ -332,7 +345,7 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 		return JournalEntry{}, "", appErr(ErrValidation, "journal entry must balance: debit=%d credit=%d", debit, credit)
 	}
 	if entry.ID == "" {
-		entry.ID = makeID("jrnl", entry.Date, entry.Memo, postingFingerprint(entry.Postings), sourceKey)
+		entry.ID = makeID("jrnl", string(entry.AccountingBasis), entry.Date, entry.Memo, postingFingerprint(entry.Postings), sourceKey)
 	}
 	if sourceKey != "" {
 		if existingID, ok := st.SourceKeys[sourceKey]; ok {
@@ -360,7 +373,7 @@ func sourceKeyForEntry(entry JournalEntry) string {
 }
 
 func journalEquivalent(a, b JournalEntry) bool {
-	if a.Date != b.Date || a.Memo != b.Memo || a.Source != b.Source || a.SourceKey != b.SourceKey {
+	if a.Date != b.Date || a.Memo != b.Memo || a.AccountingBasis != b.AccountingBasis || a.Source != b.Source || a.SourceKey != b.SourceKey {
 		return false
 	}
 	if len(a.Postings) != len(b.Postings) {

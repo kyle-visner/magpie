@@ -150,6 +150,64 @@ func TestCLICreatesAndUpdatesAccountNumber(t *testing.T) {
 	}
 }
 
+func TestCLIConfiguresAccountingBasisAndStampsJournalEntries(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "book", "settings", "set", "--accounting-basis", "modified_cash"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	settings := decoded["settings"].(map[string]any)
+	if settings["accounting_basis"] != "modified_cash" {
+		t.Fatalf("expected modified cash settings, got %#v", settings)
+	}
+
+	out.Reset()
+	if err := run([]string{"--store", dir, "ledger", "account", "create", "--name", "Checking", "--type", "asset"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	cashID := extractNestedString(t, out.Bytes(), "account", "id")
+	out.Reset()
+	if err := run([]string{"--store", dir, "ledger", "account", "create", "--name", "Revenue", "--type", "revenue"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	revenueID := extractNestedString(t, out.Bytes(), "account", "id")
+	entryPath := filepath.Join(dir, "modified-cash-entry.json")
+	entry := `{"date":"2026-06-28","memo":"Paid invoice under modified cash","postings":[{"account_id":"` + cashID + `","debit_cents":5000},{"account_id":"` + revenueID + `","credit_cents":5000}]}`
+	if err := os.WriteFile(entryPath, []byte(entry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "ledger", "journal", "create", "--file", entryPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	created := decoded["entry"].(map[string]any)
+	if created["accounting_basis"] != "modified_cash" {
+		t.Fatalf("expected stamped journal accounting basis, got %#v", created)
+	}
+
+	out.Reset()
+	if err := run([]string{"--store", dir, "--actor", "owner", "book", "settings", "get"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings["accounting_basis"] != "modified_cash" {
+		t.Fatalf("expected settings get to return modified cash, got %#v", settings)
+	}
+}
+
 func TestCLIUpdatesExistingAccountExternalRefMetadata(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer

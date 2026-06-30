@@ -75,6 +75,8 @@ func run(args []string, out io.Writer) error {
 		return writeJSON(out, nodes)
 	case "rbac":
 		return a.rbac(rest[1:], out)
+	case "book":
+		return a.book(rest[1:], out)
 	case "ledger":
 		return a.ledger(rest[1:], out)
 	case "note":
@@ -83,6 +85,45 @@ func run(args []string, out io.Writer) error {
 		return a.snapshot(rest[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q", rest[0])
+	}
+}
+
+func (a app) book(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("book command required")
+	}
+	switch args[0] {
+	case "settings":
+		return a.bookSettings(args[1:], out)
+	default:
+		return fmt.Errorf("unknown book command %q", args[0])
+	}
+}
+
+func (a app) bookSettings(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("book settings command required")
+	}
+	switch args[0] {
+	case "get":
+		settings, err := a.store.GetBookSettings(a.ctx)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, settings)
+	case "set":
+		fs := newFlagSet("book settings set")
+		accountingBasis := fs.String("accounting-basis", "", "cash|modified_cash|accrual")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		settings, root, err := a.store.SetAccountingBasis(a.ctx, infobase.AccountingBasis(*accountingBasis))
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "settings": settings})
+	default:
+		return fmt.Errorf("unknown book settings command %q", args[0])
 	}
 }
 
@@ -372,6 +413,8 @@ Commands:
   init
   state
   audit
+  book settings get
+  book settings set --accounting-basis cash|modified_cash|accrual
   rbac permissions
   rbac role set --name NAME --permissions p1,p2
   rbac user set --id ID --role ROLE

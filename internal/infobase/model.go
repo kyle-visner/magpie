@@ -5,14 +5,15 @@ import "time"
 type Permission string
 
 const (
-	PermissionLedgerRead   Permission = "ledger:read"
-	PermissionLedgerWrite  Permission = "ledger:write"
-	PermissionNotesRead    Permission = "notes:read"
-	PermissionNotesWrite   Permission = "notes:write"
-	PermissionRBACManage   Permission = "rbac:manage"
-	PermissionSnapshot     Permission = "snapshot:create"
-	PermissionAuditRead    Permission = "audit:read"
-	PermissionAdminRecover Permission = "admin:recover"
+	PermissionLedgerRead     Permission = "ledger:read"
+	PermissionLedgerWrite    Permission = "ledger:write"
+	PermissionNotesRead      Permission = "notes:read"
+	PermissionNotesWrite     Permission = "notes:write"
+	PermissionRBACManage     Permission = "rbac:manage"
+	PermissionSnapshot       Permission = "snapshot:create"
+	PermissionAuditRead      Permission = "audit:read"
+	PermissionAdminRecover   Permission = "admin:recover"
+	PermissionSettingsManage Permission = "settings:manage"
 )
 
 type Role struct {
@@ -34,6 +35,33 @@ const (
 	AccountRevenue   AccountType = "revenue"
 	AccountExpense   AccountType = "expense"
 )
+
+type AccountingBasis string
+
+const (
+	AccountingBasisCash         AccountingBasis = "cash"
+	AccountingBasisModifiedCash AccountingBasis = "modified_cash"
+	AccountingBasisAccrual      AccountingBasis = "accrual"
+)
+
+type ModifiedCashPolicy struct {
+	RevenueRecognition          string `json:"revenue_recognition"`
+	ExpenseRecognition          string `json:"expense_recognition"`
+	TrackSalesTaxLiability      bool   `json:"track_sales_tax_liability"`
+	TrackPayrollTaxLiabilities  bool   `json:"track_payroll_tax_liabilities"`
+	TrackLoanPrincipalLiability bool   `json:"track_loan_principal_liability"`
+	CapitalizeFixedAssets       bool   `json:"capitalize_fixed_assets"`
+	TrackInventory              bool   `json:"track_inventory"`
+	UseAccountsReceivable       bool   `json:"use_accounts_receivable"`
+	UseAccountsPayable          bool   `json:"use_accounts_payable"`
+}
+
+type BookSettings struct {
+	AccountingBasis    AccountingBasis    `json:"accounting_basis"`
+	ModifiedCashPolicy ModifiedCashPolicy `json:"modified_cash_policy"`
+	UpdatedAt          time.Time          `json:"updated_at,omitempty"`
+	UpdatedBy          string             `json:"updated_by,omitempty"`
+}
 
 type Account struct {
 	ID           string              `json:"id"`
@@ -63,15 +91,16 @@ type Posting struct {
 }
 
 type JournalEntry struct {
-	ID        string            `json:"id"`
-	Date      string            `json:"date"`
-	Memo      string            `json:"memo"`
-	Postings  []Posting         `json:"postings"`
-	Source    string            `json:"source,omitempty"`
-	SourceKey string            `json:"source_key,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
-	CreatedAt time.Time         `json:"created_at"`
-	CreatedBy string            `json:"created_by"`
+	ID              string            `json:"id"`
+	Date            string            `json:"date"`
+	Memo            string            `json:"memo"`
+	AccountingBasis AccountingBasis   `json:"accounting_basis,omitempty"`
+	Postings        []Posting         `json:"postings"`
+	Source          string            `json:"source,omitempty"`
+	SourceKey       string            `json:"source_key,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	CreatedAt       time.Time         `json:"created_at"`
+	CreatedBy       string            `json:"created_by"`
 }
 
 type Note struct {
@@ -89,6 +118,7 @@ type Note struct {
 type State struct {
 	Roles          map[string]Role         `json:"roles"`
 	Users          map[string]User         `json:"users"`
+	Settings       BookSettings            `json:"settings"`
 	Accounts       map[string]Account      `json:"accounts"`
 	JournalEntries map[string]JournalEntry `json:"journal_entries"`
 	Notes          map[string]Note         `json:"notes"`
@@ -100,6 +130,7 @@ func emptyState() State {
 	return State{
 		Roles:          map[string]Role{},
 		Users:          map[string]User{},
+		Settings:       DefaultBookSettings(),
 		Accounts:       map[string]Account{},
 		JournalEntries: map[string]JournalEntry{},
 		Notes:          map[string]Note{},

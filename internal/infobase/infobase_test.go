@@ -86,6 +86,109 @@ func TestRBACDeniesLedgerWritesButAllowsConfiguredNoteWrites(t *testing.T) {
 	}
 }
 
+func TestBookAccountingBasisIsExplicitVersionedAndEnforced(t *testing.T) {
+	s, ctx := newTestStore(t)
+	settings, err := s.GetBookSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.AccountingBasis != AccountingBasisCash {
+		t.Fatalf("expected default cash basis, got %#v", settings)
+	}
+	if !settings.ModifiedCashPolicy.TrackSalesTaxLiability ||
+		!settings.ModifiedCashPolicy.TrackLoanPrincipalLiability ||
+		settings.ModifiedCashPolicy.UseAccountsReceivable ||
+		settings.ModifiedCashPolicy.UseAccountsPayable {
+		t.Fatalf("unexpected modified cash policy defaults: %#v", settings.ModifiedCashPolicy)
+	}
+
+	settings, _, err = s.SetAccountingBasis(ctx, AccountingBasisAccrual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.AccountingBasis != AccountingBasisAccrual || settings.UpdatedBy != "owner" {
+		t.Fatalf("unexpected updated settings: %#v", settings)
+	}
+
+	cash := mustAccount(t, s, ctx, "Operating Bank", AccountAsset)
+	revenue := mustAccount(t, s, ctx, "Consulting Revenue", AccountRevenue)
+	entry, _, err := s.CreateJournalEntry(ctx, JournalEntry{
+		Date: "2026-06-28",
+		Memo: "Accrual-basis posting",
+		Postings: []Posting{
+			{AccountID: cash.ID, Debit: 10000},
+			{AccountID: revenue.ID, Credit: 10000},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.AccountingBasis != AccountingBasisAccrual {
+		t.Fatalf("expected journal entry to inherit active basis, got %#v", entry)
+	}
+
+	_, _, err = s.CreateJournalEntry(ctx, JournalEntry{
+		Date:            "2026-06-28",
+		Memo:            "Stale cash-basis posting",
+		AccountingBasis: AccountingBasisCash,
+		Postings: []Posting{
+			{AccountID: cash.ID, Debit: 5000},
+			{AccountID: revenue.ID, Credit: 5000},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected mismatched journal accounting basis to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrValidation {
+		t.Fatalf("expected basis mismatch validation error, got %#v", err)
+	}
+
+	_, _, err = s.SetAccountingBasis(ctx, AccountingBasisModifiedCash)
+	if err == nil {
+		t.Fatal("expected accounting basis change after journals to fail")
+	}
+	if !errors.As(err, &app) || app.Code != ErrValidation {
+		t.Fatalf("expected basis change validation error, got %#v", err)
+	}
+
+	nodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawSettingsUpdate bool
+	for _, node := range nodes {
+		if node.Type == "book.settings" && node.Command == "book settings set" {
+			sawSettingsUpdate = true
+			break
+		}
+	}
+	if !sawSettingsUpdate {
+		t.Fatal("expected accounting basis update to be versioned in audit log")
+	}
+}
+
+func TestOnlySettingsManagersCanChangeAccountingBasis(t *testing.T) {
+	s, owner := newTestStore(t)
+	if _, err := s.UpsertUser(owner, User{ID: "accountant", Role: "Accountant"}); err != nil {
+		t.Fatal(err)
+	}
+	accountant := Context{Actor: "accountant"}
+
+	if _, _, err := s.SetAccountingBasis(accountant, AccountingBasisAccrual); err == nil {
+		t.Fatal("expected Accountant to be denied settings changes")
+	} else {
+		var app *AppError
+		if !errors.As(err, &app) || app.Code != ErrPermission {
+			t.Fatalf("expected permission error, got %#v", err)
+		}
+	}
+
+	if _, err := s.GetBookSettings(accountant); err != nil {
+		t.Fatalf("expected Accountant to read book settings: %v", err)
+	}
+}
+
 func TestAccountExternalRefsAreStructuredAndUnique(t *testing.T) {
 	s, ctx := newTestStore(t)
 	acct, _, err := s.CreateAccountWithExternalRefs(ctx, "Mercury Checking ****1234", AccountAsset, "confidential", []ExternalSourceRef{{
@@ -394,6 +497,49 @@ func TestSourceTaggedJournalEntriesAreBalancedAndIdempotent(t *testing.T) {
 	var app *AppError
 	if !errors.As(err, &app) || app.Code != ErrConflict {
 		t.Fatalf("expected source-key conflict, got %#v", err)
+	}
+}
+
+func TestLegacySourceTaggedJournalWithoutBasisReplaysWithEffectiveBasis(t *testing.T) {
+	s, ctx := newTestStore(t)
+	cash := mustAccount(t, s, ctx, "Operating Bank", AccountAsset)
+	revenue := mustAccount(t, s, ctx, "Consulting Revenue", AccountRevenue)
+	legacy := JournalEntry{
+		ID:        "jrnl:legacy-source-entry",
+		Date:      "2026-06-01",
+		Memo:      "Legacy source-tagged entry",
+		Source:    "legacy_export",
+		SourceKey: "legacy-1",
+		Postings: []Posting{
+			{AccountID: cash.ID, Debit: 125000},
+			{AccountID: revenue.ID, Credit: 125000},
+		},
+		CreatedAt: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+		CreatedBy: "owner",
+	}
+	root, err := s.appendEvent(ctx, "ledger.journal", legacy.ID, "ledger journal create", wrapEvent("journal.create", journalCreatePayload{
+		Entry:     legacy,
+		SourceKey: "legacy_export:legacy-1",
+	}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed := st.JournalEntries[legacy.ID]
+	if replayed.AccountingBasis != AccountingBasisCash {
+		t.Fatalf("expected legacy journal to replay with cash basis, got %#v", replayed)
+	}
+
+	createdAgain, rootAgain, err := s.CreateJournalEntry(ctx, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createdAgain.ID != legacy.ID || rootAgain != root {
+		t.Fatalf("expected legacy source-key idempotency, got entry=%s root=%s", createdAgain.ID, rootAgain)
 	}
 }
 

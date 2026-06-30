@@ -279,6 +279,10 @@ func (s *Store) applyNode(st *State, node Node) error {
 		}
 		st.Roles = ev.Roles
 		st.Users = ev.Users
+		st.Settings = ev.Settings
+		if st.Settings.AccountingBasis == "" {
+			st.Settings = DefaultBookSettings()
+		}
 	case "role.upsert":
 		var ev roleUpsertPayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
@@ -311,9 +315,24 @@ func (s *Store) applyNode(st *State, node Node) error {
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
 			return err
 		}
+		if ev.Entry.AccountingBasis == "" {
+			ev.Entry.AccountingBasis = st.effectiveSettings().AccountingBasis
+		}
 		st.JournalEntries[ev.Entry.ID] = ev.Entry
 		if ev.SourceKey != "" {
 			st.SourceKeys[ev.SourceKey] = ev.Entry.ID
+		}
+	case "settings.update":
+		var ev settingsUpdatePayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return err
+		}
+		if _, err := normalizeAccountingBasis(ev.Settings.AccountingBasis); err != nil {
+			return err
+		}
+		st.Settings = ev.Settings
+		if st.Settings.ModifiedCashPolicy == (ModifiedCashPolicy{}) {
+			st.Settings.ModifiedCashPolicy = DefaultModifiedCashPolicy()
 		}
 	case "note.upsert":
 		var ev noteUpsertPayload

@@ -11,6 +11,7 @@ It is built around one rule: agents and humans use the same CLI, and the CLI enf
 - AES-256-GCM encryption for stored node payloads.
 - Unified RBAC for ledger, notes, snapshots, and audit reads.
 - Double-entry ledger validation before persistence.
+- Book-level accounting basis support for cash, modified cash, and accrual accounting.
 - Structured external source references on ledger accounts.
 - Markdown note create, update, list, and get operations.
 - Source-tagged journal entries for agent-mapped exports from QuickBooks or other systems.
@@ -62,6 +63,8 @@ Operational rules for agents:
 - Treat stderr as JSON error output.
 - Never edit `.infobase/` files directly.
 - Never invent raw storage mutations.
+- Read `book settings get` before posting financial activity.
+- Use the active `accounting_basis` for the whole book; do not choose cash, modified cash, or accrual per transaction.
 - Use `ledger account list` before creating journal entries so account IDs are exact.
 - Use `note put --body-file FILE` for long note bodies to avoid shell quoting issues.
 - Create a `snapshot create --name NAME` before large agent workflows.
@@ -150,6 +153,53 @@ Read a specific note:
 ```sh
 ./infobase --store .infobase --actor notes-agent note get --id note:...
 ```
+
+## Book Accounting Basis
+
+InfoBase is opinionated about accounting methods. The book has exactly one active accounting basis:
+
+- `cash`: recognize income when cash is received and expenses when cash is paid.
+- `modified_cash`: cash treatment for ordinary income and expenses, with explicit balance-sheet treatment for sales tax liabilities, payroll tax liabilities, loan principal, and capitalized fixed assets.
+- `accrual`: recognize revenue when earned or invoiced and expenses when incurred or billed, using accounts receivable and accounts payable where appropriate.
+
+New stores default to `cash`. Check the current setting before an agent posts entries:
+
+```sh
+./infobase --store .infobase --actor owner book settings get
+```
+
+Set the accounting basis before entering journal activity:
+
+```sh
+./infobase --store .infobase --actor owner book settings set \
+  --accounting-basis accrual
+```
+
+Changing the accounting basis requires `settings:manage`, which the default `Owner` and `Admin` roles have. InfoBase rejects basis changes after journal entries exist, because changing accounting method after postings would require a controlled migration or restatement workflow.
+
+Every new journal entry is stamped with the active `accounting_basis`. If an agent submits a journal entry with an explicit `accounting_basis` that does not match the active book setting, the write is rejected.
+
+Modified cash policy is deliberately narrow:
+
+- Revenue is recognized when cash is received.
+- Ordinary expenses are recognized when cash is paid.
+- Sales tax and payroll tax are tracked as liabilities.
+- Loan principal is tracked as a liability, separate from interest expense.
+- Fixed assets are capitalized.
+- Inventory, accounts receivable, and accounts payable are not used by default.
+
+For normal service invoices, agents should post according to the active basis:
+
+- Cash or modified cash, when paid: debit cash, credit revenue, credit sales tax payable when collected.
+- Accrual, when issued: debit accounts receivable, credit revenue, credit sales tax payable.
+- Accrual, when paid: debit cash, credit accounts receivable.
+
+For vendor bills:
+
+- Cash or modified cash: expense when paid, except for explicit modified-cash balance-sheet items such as fixed assets, loans, and taxes.
+- Accrual: on bill, debit expense or asset and credit accounts payable; on payment, debit accounts payable and credit cash.
+
+InfoBase does not let agents mix A/R-style invoice posting with cash-basis revenue recognition unless the book is configured for the accounting basis that supports it.
 
 ## Ledger Workflow
 
@@ -398,6 +448,8 @@ Both `state` and `audit` require `audit:read`.
 init
 state
 audit
+book settings get
+book settings set --accounting-basis cash|modified_cash|accrual
 rbac permissions
 rbac role set --name NAME --permissions p1,p2
 rbac user set --id ID --role ROLE
