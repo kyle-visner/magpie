@@ -14,6 +14,7 @@ It is built around one rule: agents and humans use the same CLI, and the CLI enf
 - Book-level accounting basis support for cash, modified cash, and accrual accounting.
 - Chart account roles for workflow-safe account selection.
 - Privileged manual journal adjustments with required audit reasons.
+- First-class customer and invoice workflows that generate basis-aware journals.
 - Structured external source references on ledger accounts.
 - Markdown note create, update, list, and get operations.
 - Source-tagged journal entries for agent-mapped exports from QuickBooks or other systems.
@@ -68,6 +69,7 @@ Operational rules for agents:
 - Read `book settings get` before posting financial activity.
 - Use the active `accounting_basis` for the whole book; do not choose cash, modified cash, or accrual per transaction.
 - Use account roles rather than account names or numbers when deciding what an account means.
+- Use `invoice create-json`, `invoice post`, and `invoice mark-paid` for customer invoice activity.
 - Do not use generic `ledger journal create` for ordinary operating activity. It is a privileged manual adjustment/import path.
 - Use `note put --body-file FILE` for long note bodies to avoid shell quoting issues.
 - Create a `snapshot create --name NAME` before large agent workflows.
@@ -109,6 +111,14 @@ Built-in roles:
 - `Accountant`: ledger, notes read, and audit read.
 - `Operations`: notes read/write only.
 - `Sales Rep`: notes read/write only.
+
+Stores initialized before new built-in permissions were added can repair default roles without changing custom roles or users:
+
+```sh
+./infobase --store .infobase --actor owner rbac defaults repair
+```
+
+The repair command requires `rbac:manage`, adds missing current default permissions to built-in roles, and preserves any existing extra permissions on those roles.
 
 To define a custom role:
 
@@ -202,7 +212,7 @@ For vendor bills:
 - Cash or modified cash: expense when paid, except for explicit modified-cash balance-sheet items such as fixed assets, loans, and taxes.
 - Accrual: on bill, debit expense or asset and credit accounts payable; on payment, debit accounts payable and credit cash.
 
-InfoBase currently prevents ordinary agents from bypassing these rules with generic manual journals. The upcoming invoice workflow must enforce the A/R versus cash-basis posting semantics directly.
+InfoBase prevents ordinary agents from bypassing these rules with generic manual journals, and invoice workflows enforce the A/R versus cash-basis posting semantics directly.
 
 ## Ledger Workflow
 
@@ -273,20 +283,20 @@ Role rules:
 
 Ledger accounts can carry first-class external source references for bank sync, reconciliation, and migration traceability. This is intentionally stored on the account, not in sidecar notes or name-only conventions.
 
-Example Mercury account:
+Example external bank account:
 
 ```sh
 ./infobase --store .infobase --actor owner ledger account create \
   --number 1010 \
-  --name "Mercury Checking ****1234" \
+  --name "Operating Checking ****1234" \
   --type asset \
   --role bank_account \
   --sensitivity confidential \
-  --external-source mercury \
-  --external-id mercury-account-1 \
+  --external-source bank_provider \
+  --external-id bank-account-1 \
   --external-type bank_account \
-  --external-display-name "Mercury Operating Checking" \
-  --external-url https://dashboard.mercury.com/accounts/mercury-account-1 \
+  --external-display-name "Operating Checking" \
+  --external-url https://bank.example.com/accounts/bank-account-1 \
   --external-meta account_kind=checking \
   --external-meta "nickname=Operating Checking" \
   --external-meta 'mask=****1234' \
@@ -301,11 +311,11 @@ Stored account JSON includes:
   "role": "bank_account",
   "external_refs": [
     {
-      "source_system": "mercury",
-      "external_id": "mercury-account-1",
+      "source_system": "bank_provider",
+      "external_id": "bank-account-1",
       "external_type": "bank_account",
-      "display_name": "Mercury Operating Checking",
-      "url": "https://dashboard.mercury.com/accounts/mercury-account-1",
+      "display_name": "Operating Checking",
+      "url": "https://bank.example.com/accounts/bank-account-1",
       "metadata": {
         "account_kind": "checking",
         "nickname": "Operating Checking",
@@ -351,15 +361,18 @@ Add or update an external ref on an existing account:
 ```sh
 ./infobase --store .infobase --actor owner ledger account external-ref set \
   --account-id acct:OPERATING_BANK_ID \
-  --external-source mercury \
-  --external-id mercury-account-1 \
+  --external-source bank_provider \
+  --external-id bank-account-1 \
   --external-type bank_account \
-  --external-display-name "Mercury Operating Checking" \
+  --external-display-name "Operating Checking" \
+  --role bank_account \
   --external-meta account_kind=checking \
   --external-meta "nickname=Operating Checking" \
   --external-meta 'mask=****1234' \
   --external-meta last_four=1234
 ```
+
+`--role` is optional. When present, the actor must have `chart:manage`, and the role/type/uniqueness checks are applied in the same account update as the external reference.
 
 If the account already has a ref with the same `source_system + external_id`, the command replaces that ref. If another account already has that ref, the command fails with a conflict.
 
@@ -370,6 +383,186 @@ Validation rules:
 - `--external-url` must be an absolute HTTPS URL.
 - `metadata.last_four`, when present, must contain exactly four digits.
 - The pair `source_system + external_id` must be unique across ledger accounts.
+
+## Customer And Invoice Workflow
+
+Invoices are first-class source documents. Agents should create customers and invoices, then let InfoBase generate workflow-originated journal entries according to the active accounting basis. InfoBase is bank and financial-institution agnostic: the AI bookkeeping agent interprets source-specific exports and submits normalized JSON with external references.
+
+Minimum account roles for service invoices:
+
+- `operating_cash` or `bank_account` for the payment/deposit account.
+- `default_service_revenue`, `default_product_revenue`, or `other_income` on each invoice line.
+- `sales_tax_payable` when the invoice includes sales tax.
+- `accounts_receivable` when the book uses `accrual`.
+
+For normalized external imports, line-level `revenue_account_id` may be omitted. InfoBase resolves omitted revenue accounts to the configured `default_service_revenue` account and fails the import if that role is not configured. Line-level `tax_amount_cents` may also be supplied; InfoBase sums line taxes into invoice-level `tax_amount_cents` when the invoice-level value is omitted, and rejects mismatches when both are present.
+
+Create or update a customer:
+
+```json
+{
+  "name": "Acme Co",
+  "external_refs": [
+    {
+      "source_system": "billing_platform",
+      "external_id": "customer-123",
+      "external_type": "customer",
+      "display_name": "Acme Co"
+    }
+  ]
+}
+```
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent customer create-json \
+  --file ./customer.json
+```
+
+Create an invoice:
+
+```json
+{
+  "invoice_number": "INV-1001",
+  "customer_id": "cust:ACME_ID",
+  "invoice_date": "2026-06-01",
+  "due_date": "2026-06-30",
+  "line_items": [
+    {
+      "description": "Services",
+      "revenue_account_id": "acct:SERVICE_REVENUE_ID",
+      "quantity": 1,
+      "unit_amount_cents": 100000,
+      "amount_cents": 100000
+    }
+  ],
+  "subtotal_cents": 100000,
+  "tax_amount_cents": 8500,
+  "total_cents": 108500,
+  "external_refs": [
+    {
+      "source_system": "billing_platform",
+      "external_id": "invoice-1001",
+      "external_type": "invoice"
+    }
+  ]
+}
+```
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent invoice create-json \
+  --file ./invoice.json
+```
+
+For source imports, prefer one normalized external invoice payload. This keeps source-specific parsing in the agent while giving InfoBase a first-class, idempotent workflow:
+
+```json
+{
+  "post": true,
+  "customer": {
+    "name": "Acme Co",
+    "external_refs": [
+      {
+        "source_system": "billing_platform",
+        "external_id": "customer-123",
+        "external_type": "customer",
+        "display_name": "Acme Co"
+      }
+    ]
+  },
+  "invoice": {
+    "invoice_number": "INV-1001",
+    "invoice_date": "2026-06-01",
+    "due_date": "2026-06-30",
+    "status": "paid",
+    "line_items": [
+      {
+        "description": "Services",
+        "quantity": 1,
+        "unit_amount_cents": 100000,
+        "amount_cents": 100000,
+        "tax_amount_cents": 8500
+      }
+    ],
+    "subtotal_cents": 100000,
+    "total_cents": 108500,
+    "external_refs": [
+      {
+        "source_system": "billing_platform",
+        "external_id": "invoice-1001",
+        "external_type": "invoice"
+      }
+    ]
+  },
+  "payment": {
+    "date": "2026-06-15",
+    "amount_cents": 108500,
+    "cash_account_id": "acct:OPERATING_CASH_ID",
+    "external_source": "bank_feed",
+    "external_id": "txn-123",
+    "payment_evidence": "external_transaction_match"
+  }
+}
+```
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent invoice import-json \
+  --file ./external-invoice.json
+```
+
+`invoice import-json` upserts the customer by external reference, creates or reuses the invoice by external reference, posts it when `post` is true or the external status is `open`/`paid`, and marks it paid only when payment evidence and a cash/bank account are provided. A `paid` import without payment data is rejected instead of recording a paid status without accounting evidence.
+
+Post the invoice:
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent invoice post \
+  --invoice-id inv:...
+```
+
+Posting behavior:
+
+- `cash` and `modified_cash`: opens the invoice but does not create A/R or revenue journals yet.
+- `accrual`: creates a workflow journal for invoice issue: debit `accounts_receivable`, credit revenue, and credit `sales_tax_payable` when tax is present.
+
+Mark the invoice paid:
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent invoice mark-paid \
+  --invoice-id inv:... \
+  --cash-account-id acct:OPERATING_CASH_ID \
+  --paid-date 2026-06-15 \
+  --amount-cents 108500 \
+  --external-source bank_feed \
+  --external-id txn-123 \
+  --payment-evidence external_transaction_match
+```
+
+Payment behavior:
+
+- `cash` and `modified_cash`: creates a workflow journal that debits cash, credits revenue, and credits `sales_tax_payable` when tax is present. A/R is not used.
+- `accrual`: requires the invoice to be posted first, then creates a workflow journal that debits cash and credits `accounts_receivable`.
+
+Reverse an incorrect payment:
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent invoice reverse-payment \
+  --invoice-id inv:... \
+  --payment-id pay:... \
+  --reversal-date 2026-06-16 \
+  --reason "invoice was incorrectly marked paid"
+```
+
+Payment reversals create a new workflow journal that exactly offsets the original payment journal. The original payment and journal remain in the audit trail; the payment is marked reversed and the invoice status is recomputed from non-reversed payments.
+
+Workflow journals are stored with `origin: "workflow"`, `workflow`, `posting_semantics`, `source_document_type`, and `source_document_id`. Invoice workflow writes are idempotent by source key so agents can retry safely.
+
+List source documents:
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent customer get --customer-id cust:...
+./infobase --store .infobase --actor bookkeeping-agent customer list
+./infobase --store .infobase --actor bookkeeping-agent invoice get --invoice-id inv:...
+./infobase --store .infobase --actor bookkeeping-agent invoice list
+```
 
 ## Manual Journal Adjustments
 
@@ -500,6 +693,17 @@ state
 audit
 book settings get
 book settings set --accounting-basis cash|modified_cash|accrual
+customer create-json --file customer.json
+customer get --customer-id ID
+customer list
+invoice create-json --file invoice.json
+invoice import-json --file external-invoice.json
+invoice post --invoice-id ID
+invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
+invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
+invoice get --invoice-id ID
+invoice list
+rbac defaults repair
 rbac permissions
 rbac role set --name NAME --permissions p1,p2
 rbac user set --id ID --role ROLE
@@ -508,7 +712,7 @@ ledger account create-json --file account.json
 ledger account number set --account-id ID --number NUMBER
 ledger account role list
 ledger account role set --account-id ID --role ROLE
-ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID
+ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID [--role ROLE]
 ledger account list
 ledger journal create --file entry.json
 ledger journal list

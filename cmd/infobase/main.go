@@ -77,6 +77,10 @@ func run(args []string, out io.Writer) error {
 		return a.rbac(rest[1:], out)
 	case "book":
 		return a.book(rest[1:], out)
+	case "customer":
+		return a.customer(rest[1:], out)
+	case "invoice":
+		return a.invoice(rest[1:], out)
 	case "ledger":
 		return a.ledger(rest[1:], out)
 	case "note":
@@ -85,6 +89,166 @@ func run(args []string, out io.Writer) error {
 		return a.snapshot(rest[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q", rest[0])
+	}
+}
+
+func (a app) customer(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("customer command required")
+	}
+	switch args[0] {
+	case "create-json":
+		fs := newFlagSet("customer create-json")
+		file := fs.String("file", "", "JSON file with a customer; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var customer infobase.Customer
+		if err := readJSONFile(*file, &customer); err != nil {
+			return err
+		}
+		created, root, err := a.store.UpsertCustomer(a.ctx, customer)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "customer": created})
+	case "get":
+		fs := newFlagSet("customer get")
+		customerID := fs.String("customer-id", "", "InfoBase customer id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		customer, err := a.store.GetCustomer(a.ctx, *customerID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, customer)
+	case "list":
+		st, err := a.store.LoadState()
+		if err != nil {
+			return err
+		}
+		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionLedgerRead); err != nil {
+			return err
+		}
+		return writeJSON(out, st.Customers)
+	default:
+		return fmt.Errorf("unknown customer command %q", args[0])
+	}
+}
+
+func (a app) invoice(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("invoice command required")
+	}
+	switch args[0] {
+	case "create-json":
+		fs := newFlagSet("invoice create-json")
+		file := fs.String("file", "", "JSON file with an invoice; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var invoice infobase.Invoice
+		if err := readJSONFile(*file, &invoice); err != nil {
+			return err
+		}
+		created, root, err := a.store.CreateInvoice(a.ctx, invoice)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": created})
+	case "import-json":
+		fs := newFlagSet("invoice import-json")
+		file := fs.String("file", "", "JSON file with normalized external invoice import; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var req infobase.ExternalInvoiceImportRequest
+		if err := readJSONFile(*file, &req); err != nil {
+			return err
+		}
+		result, root, err := a.store.ImportExternalInvoice(a.ctx, req)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "import": result})
+	case "post":
+		fs := newFlagSet("invoice post")
+		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		invoice, root, err := a.store.PostInvoice(a.ctx, *invoiceID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
+	case "mark-paid":
+		fs := newFlagSet("invoice mark-paid")
+		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		cashAccountID := fs.String("cash-account-id", "", "cash or bank account id")
+		date := fs.String("paid-date", "", "payment date YYYY-MM-DD")
+		amount := fs.Int64("amount-cents", 0, "payment amount in cents")
+		externalSource := fs.String("external-source", "", "external payment source")
+		externalID := fs.String("external-id", "", "external payment id")
+		paymentEvidence := fs.String("payment-evidence", "", "payment evidence provenance")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		invoice, root, err := a.store.MarkInvoicePaid(a.ctx, *invoiceID, infobase.InvoicePaymentRequest{
+			Date:            *date,
+			AmountCents:     *amount,
+			CashAccountID:   *cashAccountID,
+			ExternalSource:  *externalSource,
+			ExternalID:      *externalID,
+			PaymentEvidence: *paymentEvidence,
+		})
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
+	case "reverse-payment":
+		fs := newFlagSet("invoice reverse-payment")
+		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		paymentID := fs.String("payment-id", "", "InfoBase payment id")
+		journalEntryID := fs.String("journal-entry-id", "", "payment journal entry id")
+		date := fs.String("reversal-date", "", "reversal date YYYY-MM-DD")
+		reason := fs.String("reason", "", "reason for reversal")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		invoice, root, err := a.store.ReverseInvoicePayment(a.ctx, *invoiceID, infobase.InvoicePaymentReversalRequest{
+			PaymentID:      *paymentID,
+			JournalEntryID: *journalEntryID,
+			Date:           *date,
+			Reason:         *reason,
+		})
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
+	case "get":
+		fs := newFlagSet("invoice get")
+		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		invoice, err := a.store.GetInvoice(a.ctx, *invoiceID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, invoice)
+	case "list":
+		st, err := a.store.LoadState()
+		if err != nil {
+			return err
+		}
+		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionLedgerRead); err != nil {
+			return err
+		}
+		return writeJSON(out, st.Invoices)
+	default:
+		return fmt.Errorf("unknown invoice command %q", args[0])
 	}
 }
 
@@ -163,6 +327,15 @@ func (a app) rbac(args []string, out io.Writer) error {
 			return err
 		}
 		return writeJSON(out, map[string]any{"root": hash, "role": *name})
+	case "defaults":
+		if len(args) < 2 || args[1] != "repair" {
+			return fmt.Errorf("usage: rbac defaults repair")
+		}
+		result, root, err := a.store.RepairDefaultRoles(a.ctx)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "repair": result})
 	case "permissions":
 		return writeJSON(out, infobase.PermissionNames())
 	default:
@@ -196,7 +369,7 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 		typ := fs.String("type", "", "asset|liability|equity|revenue|expense")
 		role := fs.String("role", "", "account role, such as bank_account or accounts_receivable")
 		sensitivity := fs.String("sensitivity", "internal", "sensitivity label")
-		externalSource := fs.String("external-source", "", "external source system, such as mercury")
+		externalSource := fs.String("external-source", "", "external source system")
 		externalID := fs.String("external-id", "", "external source id")
 		externalType := fs.String("external-type", "", "external source type, such as bank_account or chart_account")
 		externalDisplayName := fs.String("external-display-name", "", "external display name")
@@ -308,24 +481,25 @@ func (a app) ledgerAccountExternalRef(args []string, out io.Writer) error {
 	}
 	fs := newFlagSet("ledger account external-ref set")
 	accountID := fs.String("account-id", "", "InfoBase account id")
-	externalSource := fs.String("external-source", "", "external source system, such as mercury")
+	externalSource := fs.String("external-source", "", "external source system")
 	externalID := fs.String("external-id", "", "external source id")
 	externalType := fs.String("external-type", "", "external source type, such as bank_account or chart_account")
 	externalDisplayName := fs.String("external-display-name", "", "external display name")
 	externalURL := fs.String("external-url", "", "external source URL")
+	role := fs.String("role", "", "optional account role to assign with this external ref")
 	externalMetadata := metadataFlag{}
 	fs.Var(&externalMetadata, "external-meta", "external metadata key=value; may be repeated")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	account, root, err := a.store.SetAccountExternalRef(a.ctx, *accountID, infobase.ExternalSourceRef{
+	account, root, err := a.store.SetAccountExternalRefWithRole(a.ctx, *accountID, infobase.ExternalSourceRef{
 		SourceSystem: *externalSource,
 		ExternalID:   *externalID,
 		ExternalType: *externalType,
 		DisplayName:  *externalDisplayName,
 		URL:          *externalURL,
 		Metadata:     externalMetadata,
-	})
+	}, infobase.AccountRole(*role))
 	if err != nil {
 		return err
 	}
@@ -443,6 +617,17 @@ Commands:
   audit
   book settings get
   book settings set --accounting-basis cash|modified_cash|accrual
+  customer create-json --file customer.json
+  customer get --customer-id ID
+  customer list
+  invoice create-json --file invoice.json
+  invoice import-json --file external-invoice.json
+  invoice post --invoice-id ID
+  invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
+  invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
+  invoice get --invoice-id ID
+  invoice list
+  rbac defaults repair
   rbac permissions
   rbac role set --name NAME --permissions p1,p2
   rbac user set --id ID --role ROLE
@@ -451,7 +636,7 @@ Commands:
   ledger account number set --account-id ID --number NUMBER
   ledger account role list
   ledger account role set --account-id ID --role ROLE
-  ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID
+  ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID [--role ROLE]
   ledger account list
   ledger journal create --file entry.json
   ledger journal list

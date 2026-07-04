@@ -103,6 +103,84 @@ const (
 	JournalOriginSystem           JournalOrigin = "system"
 )
 
+type SourceDocumentStatus string
+
+const (
+	SourceDocumentImported SourceDocumentStatus = "imported"
+	SourceDocumentOpen     SourceDocumentStatus = "open"
+	SourceDocumentPaid     SourceDocumentStatus = "paid"
+	SourceDocumentVoid     SourceDocumentStatus = "void"
+)
+
+type Customer struct {
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	ExternalRefs []ExternalSourceRef `json:"external_refs,omitempty"`
+	CreatedAt    time.Time           `json:"created_at"`
+	UpdatedAt    time.Time           `json:"updated_at"`
+	CreatedBy    string              `json:"created_by"`
+	UpdatedBy    string              `json:"updated_by"`
+}
+
+type InvoiceLineItem struct {
+	Description      string `json:"description"`
+	RevenueAccountID string `json:"revenue_account_id"`
+	Quantity         int64  `json:"quantity"`
+	UnitAmountCents  int64  `json:"unit_amount_cents"`
+	AmountCents      int64  `json:"amount_cents"`
+	TaxAmountCents   int64  `json:"tax_amount_cents,omitempty"`
+}
+
+type InvoicePayment struct {
+	ID                     string `json:"id"`
+	Date                   string `json:"date"`
+	AmountCents            int64  `json:"amount_cents"`
+	CashAccountID          string `json:"cash_account_id"`
+	JournalEntryID         string `json:"journal_entry_id,omitempty"`
+	ExternalSource         string `json:"external_source,omitempty"`
+	ExternalID             string `json:"external_id,omitempty"`
+	PaymentEvidence        string `json:"payment_evidence,omitempty"`
+	Reversed               bool   `json:"reversed,omitempty"`
+	ReversalDate           string `json:"reversal_date,omitempty"`
+	ReversalReason         string `json:"reversal_reason,omitempty"`
+	ReversalJournalEntryID string `json:"reversal_journal_entry_id,omitempty"`
+}
+
+type ExternalInvoiceImportRequest struct {
+	Customer Customer               `json:"customer"`
+	Invoice  Invoice                `json:"invoice"`
+	Post     bool                   `json:"post"`
+	Payment  *InvoicePaymentRequest `json:"payment,omitempty"`
+}
+
+type ExternalInvoiceImportResult struct {
+	Customer Customer `json:"customer"`
+	Invoice  Invoice  `json:"invoice"`
+	Posted   bool     `json:"posted"`
+	Paid     bool     `json:"paid"`
+}
+
+type Invoice struct {
+	ID                     string               `json:"id"`
+	InvoiceNumber          string               `json:"invoice_number"`
+	CustomerID             string               `json:"customer_id"`
+	InvoiceDate            string               `json:"invoice_date"`
+	DueDate                string               `json:"due_date,omitempty"`
+	Status                 SourceDocumentStatus `json:"status"`
+	LineItems              []InvoiceLineItem    `json:"line_items"`
+	SubtotalCents          int64                `json:"subtotal_cents"`
+	TaxAmountCents         int64                `json:"tax_amount_cents"`
+	TotalCents             int64                `json:"total_cents"`
+	ExternalRefs           []ExternalSourceRef  `json:"external_refs,omitempty"`
+	IssuedJournalEntryID   string               `json:"issued_journal_entry_id,omitempty"`
+	PaymentJournalEntryIDs []string             `json:"payment_journal_entry_ids,omitempty"`
+	Payments               []InvoicePayment     `json:"payments,omitempty"`
+	CreatedAt              time.Time            `json:"created_at"`
+	UpdatedAt              time.Time            `json:"updated_at"`
+	CreatedBy              string               `json:"created_by"`
+	UpdatedBy              string               `json:"updated_by"`
+}
+
 type Account struct {
 	ID           string              `json:"id"`
 	Number       string              `json:"number,omitempty"`
@@ -169,6 +247,8 @@ type State struct {
 	Settings       BookSettings            `json:"settings"`
 	Accounts       map[string]Account      `json:"accounts"`
 	JournalEntries map[string]JournalEntry `json:"journal_entries"`
+	Customers      map[string]Customer     `json:"customers"`
+	Invoices       map[string]Invoice      `json:"invoices"`
 	Notes          map[string]Note         `json:"notes"`
 	SourceKeys     map[string]string       `json:"source_keys"`
 	Root           string                  `json:"root,omitempty"`
@@ -181,6 +261,8 @@ func emptyState() State {
 		Settings:       DefaultBookSettings(),
 		Accounts:       map[string]Account{},
 		JournalEntries: map[string]JournalEntry{},
+		Customers:      map[string]Customer{},
+		Invoices:       map[string]Invoice{},
 		Notes:          map[string]Note{},
 		SourceKeys:     map[string]string{},
 	}

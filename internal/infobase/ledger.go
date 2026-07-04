@@ -22,6 +22,19 @@ type journalCreatePayload struct {
 	SourceKey string       `json:"source_key,omitempty"`
 }
 
+type workflowJournalRequest struct {
+	Date               string
+	Memo               string
+	Workflow           string
+	PostingSemantics   string
+	SourceDocumentType string
+	SourceDocumentID   string
+	Source             string
+	SourceKey          string
+	Postings           []Posting
+	Metadata           map[string]string
+}
+
 func (s *Store) CreateAccount(ctx Context, name string, typ AccountType, sensitivity string) (Account, string, error) {
 	return s.CreateAccountWithDetails(ctx, Account{Name: name, Type: typ, Sensitivity: sensitivity})
 }
@@ -166,12 +179,29 @@ func (s *Store) SetAccountRole(ctx Context, accountID string, role AccountRole) 
 }
 
 func (s *Store) SetAccountExternalRef(ctx Context, accountID string, ref ExternalSourceRef) (Account, string, error) {
+	return s.setAccountExternalRef(ctx, accountID, ref, "")
+}
+
+func (s *Store) SetAccountExternalRefWithRole(ctx Context, accountID string, ref ExternalSourceRef, role AccountRole) (Account, string, error) {
+	return s.setAccountExternalRef(ctx, accountID, ref, role)
+}
+
+func (s *Store) setAccountExternalRef(ctx Context, accountID string, ref ExternalSourceRef, role AccountRole) (Account, string, error) {
 	st, err := s.LoadState()
 	if err != nil {
 		return Account{}, "", err
 	}
 	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
 		return Account{}, "", err
+	}
+	normalizedRole, err := normalizeAccountRole(role)
+	if err != nil {
+		return Account{}, "", err
+	}
+	if normalizedRole != "" {
+		if err := EnsurePermission(st, ctx, PermissionChartManage); err != nil {
+			return Account{}, "", err
+		}
 	}
 	accountID = strings.TrimSpace(accountID)
 	if accountID == "" {
@@ -180,6 +210,15 @@ func (s *Store) SetAccountExternalRef(ctx Context, accountID string, ref Externa
 	account, ok := st.Accounts[accountID]
 	if !ok {
 		return Account{}, "", appErr(ErrNotFound, "account %s not found", accountID)
+	}
+	if normalizedRole != "" {
+		if err := validateAccountRoleForType(normalizedRole, account.Type); err != nil {
+			return Account{}, "", err
+		}
+		if err := ensureAccountRoleAvailable(st, accountID, normalizedRole); err != nil {
+			return Account{}, "", err
+		}
+		account.Role = normalizedRole
 	}
 	normalized, empty, err := normalizeExternalRef(ref)
 	if err != nil {
@@ -433,6 +472,86 @@ func validateAccountType(typ AccountType) error {
 
 func (s *Store) CreateJournalEntry(ctx Context, entry JournalEntry) (JournalEntry, string, error) {
 	return s.createJournalEntry(ctx, entry, sourceKeyForEntry(entry))
+}
+
+func (s *Store) createWorkflowJournalEntry(ctx Context, req workflowJournalRequest) (JournalEntry, string, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return JournalEntry{}, "", err
+	}
+	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
+		return JournalEntry{}, "", err
+	}
+	settings := st.effectiveSettings()
+	entry := JournalEntry{
+		Date:               strings.TrimSpace(req.Date),
+		Memo:               strings.TrimSpace(req.Memo),
+		AccountingBasis:    settings.AccountingBasis,
+		Origin:             JournalOriginWorkflow,
+		Workflow:           strings.TrimSpace(req.Workflow),
+		PostingSemantics:   strings.TrimSpace(req.PostingSemantics),
+		SourceDocumentType: strings.TrimSpace(req.SourceDocumentType),
+		SourceDocumentID:   strings.TrimSpace(req.SourceDocumentID),
+		Source:             strings.TrimSpace(req.Source),
+		SourceKey:          strings.TrimSpace(req.SourceKey),
+		Postings:           req.Postings,
+		Metadata:           normalizeStringMap(req.Metadata),
+		GeneratedBy:        ctx.Actor,
+	}
+	if entry.Date == "" {
+		entry.Date = s.now().UTC().Format("2006-01-02")
+	}
+	if _, err := time.Parse("2006-01-02", entry.Date); err != nil {
+		return JournalEntry{}, "", appErr(ErrValidation, "date must use YYYY-MM-DD")
+	}
+	if entry.Workflow == "" || entry.PostingSemantics == "" || entry.SourceDocumentType == "" || entry.SourceDocumentID == "" {
+		return JournalEntry{}, "", appErr(ErrValidation, "workflow journals require workflow, posting semantics, and source document metadata")
+	}
+	if entry.Source == "" || entry.SourceKey == "" {
+		return JournalEntry{}, "", appErr(ErrValidation, "workflow journals require source and source_key")
+	}
+	if len(entry.Postings) < 2 {
+		return JournalEntry{}, "", appErr(ErrValidation, "journal entry requires at least two postings")
+	}
+	var debit, credit int64
+	for i, p := range entry.Postings {
+		if p.AccountID == "" {
+			return JournalEntry{}, "", appErr(ErrValidation, "posting %d missing account_id", i)
+		}
+		if _, ok := st.Accounts[p.AccountID]; !ok {
+			return JournalEntry{}, "", appErr(ErrValidation, "posting %d references unknown account %s", i, p.AccountID)
+		}
+		if p.Debit < 0 || p.Credit < 0 {
+			return JournalEntry{}, "", appErr(ErrValidation, "posting %d has negative amount", i)
+		}
+		if p.Debit > 0 && p.Credit > 0 {
+			return JournalEntry{}, "", appErr(ErrValidation, "posting %d cannot have both debit and credit", i)
+		}
+		if p.Debit == 0 && p.Credit == 0 {
+			return JournalEntry{}, "", appErr(ErrValidation, "posting %d must have a debit or credit", i)
+		}
+		debit += p.Debit
+		credit += p.Credit
+	}
+	if debit != credit {
+		return JournalEntry{}, "", appErr(ErrValidation, "journal entry must balance: debit=%d credit=%d", debit, credit)
+	}
+	sourceKey := sourceKeyForEntry(entry)
+	entry.ID = makeID("jrnl", string(entry.AccountingBasis), entry.Workflow, entry.Date, entry.Memo, postingFingerprint(entry.Postings), sourceKey)
+	if existingID, ok := st.SourceKeys[sourceKey]; ok {
+		existing := st.JournalEntries[existingID]
+		if journalEquivalent(existing, entry) {
+			return existing, st.Root, nil
+		}
+		return JournalEntry{}, "", appErr(ErrConflict, "source key %q already belongs to journal entry %s", sourceKey, existingID)
+	}
+	if _, exists := st.JournalEntries[entry.ID]; exists {
+		return JournalEntry{}, "", appErr(ErrConflict, "journal entry already exists: %s", entry.ID)
+	}
+	entry.CreatedAt = s.now().UTC()
+	entry.CreatedBy = ctx.Actor
+	hash, err := s.appendEvent(ctx, "ledger.journal", entry.ID, "workflow journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), true)
+	return entry, hash, err
 }
 
 func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey string) (JournalEntry, string, error) {
