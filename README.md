@@ -395,6 +395,8 @@ Minimum account roles for service invoices:
 - `sales_tax_payable` when the invoice includes sales tax.
 - `accounts_receivable` when the book uses `accrual`.
 
+For normalized external imports, line-level `revenue_account_id` may be omitted. InfoBase resolves omitted revenue accounts to the configured `default_service_revenue` account and fails the import if that role is not configured.
+
 Create or update a customer:
 
 ```json
@@ -475,7 +477,6 @@ For source imports, prefer one normalized external invoice payload. This keeps s
     "line_items": [
       {
         "description": "Services",
-        "revenue_account_id": "acct:SERVICE_REVENUE_ID",
         "quantity": 1,
         "unit_amount_cents": 100000,
         "amount_cents": 100000

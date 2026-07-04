@@ -434,6 +434,13 @@ func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 		line := &invoice.LineItems[i]
 		line.Description = strings.TrimSpace(line.Description)
 		line.RevenueAccountID = strings.TrimSpace(line.RevenueAccountID)
+		if line.RevenueAccountID == "" {
+			revenueAccountID, err := accountIDByRole(st, AccountRoleDefaultServiceRevenue)
+			if err != nil {
+				return Invoice{}, appErr(ErrValidation, "invoice line %d revenue account is required because default_service_revenue is not configured", i)
+			}
+			line.RevenueAccountID = revenueAccountID
+		}
 		if line.Quantity <= 0 {
 			return Invoice{}, appErr(ErrValidation, "invoice line %d quantity must be positive", i)
 		}

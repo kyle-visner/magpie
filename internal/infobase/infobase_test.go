@@ -796,10 +796,9 @@ func TestExternalInvoiceImportIsBankAgnosticAndIdempotent(t *testing.T) {
 			InvoiceDate:   "2026-06-01",
 			Status:        SourceDocumentPaid,
 			LineItems: []InvoiceLineItem{{
-				Description:      "Services",
-				RevenueAccountID: revenue.ID,
-				Quantity:         1,
-				UnitAmountCents:  100000,
+				Description:     "Services",
+				Quantity:        1,
+				UnitAmountCents: 100000,
 			}},
 			ExternalRefs: []ExternalSourceRef{{
 				SourceSystem: "billing_platform",
@@ -823,6 +822,9 @@ func TestExternalInvoiceImportIsBankAgnosticAndIdempotent(t *testing.T) {
 	if !first.Posted || !first.Paid || first.Invoice.Status != SourceDocumentPaid {
 		t.Fatalf("expected posted paid import result: %#v", first)
 	}
+	if got := first.Invoice.LineItems[0].RevenueAccountID; got != revenue.ID {
+		t.Fatalf("expected default revenue account fallback %s, got %s", revenue.ID, got)
+	}
 	second, secondRoot, err := s.ImportExternalInvoice(ctx, req)
 	if err != nil {
 		t.Fatal(err)
@@ -841,6 +843,29 @@ func TestExternalInvoiceImportIsBankAgnosticAndIdempotent(t *testing.T) {
 		if entry.Origin != JournalOriginWorkflow || entry.Workflow != "invoice.mark_paid" || entry.SourceDocumentID != first.Invoice.ID {
 			t.Fatalf("unexpected workflow journal: %#v", entry)
 		}
+	}
+}
+
+func TestExternalInvoiceImportRequiresDefaultRevenueWhenLineOmitsAccount(t *testing.T) {
+	s, ctx := newTestStore(t)
+	_, _, err := s.ImportExternalInvoice(ctx, ExternalInvoiceImportRequest{
+		Customer: Customer{Name: "Missing Default Revenue Customer"},
+		Invoice: Invoice{
+			InvoiceNumber: "EXT-NO-DEFAULT-REVENUE",
+			InvoiceDate:   "2026-06-01",
+			LineItems: []InvoiceLineItem{{
+				Description:     "Services",
+				Quantity:        1,
+				UnitAmountCents: 100000,
+			}},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected import without explicit revenue account or default_service_revenue to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrValidation || !strings.Contains(app.Message, "default_service_revenue is not configured") {
+		t.Fatalf("expected default revenue validation error, got %#v", err)
 	}
 }
 

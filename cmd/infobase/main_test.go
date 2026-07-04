@@ -528,7 +528,6 @@ func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
 			"status": "paid",
 			"line_items": [{
 				"description": "Services",
-				"revenue_account_id": "` + revenueID + `",
 				"quantity": 1,
 				"unit_amount_cents": 125000
 			}],
@@ -563,6 +562,11 @@ func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
 	invoiceID := invoice["id"].(string)
 	if invoice["status"] != "paid" {
 		t.Fatalf("expected paid invoice import, got %#v", invoice)
+	}
+	lines := invoice["line_items"].([]any)
+	line := lines[0].(map[string]any)
+	if line["revenue_account_id"] != revenueID {
+		t.Fatalf("expected default revenue fallback %s, got %#v", revenueID, line)
 	}
 
 	out.Reset()
