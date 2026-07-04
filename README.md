@@ -275,20 +275,20 @@ Role rules:
 
 Ledger accounts can carry first-class external source references for bank sync, reconciliation, and migration traceability. This is intentionally stored on the account, not in sidecar notes or name-only conventions.
 
-Example Mercury account:
+Example external bank account:
 
 ```sh
 ./infobase --store .infobase --actor owner ledger account create \
   --number 1010 \
-  --name "Mercury Checking ****1234" \
+  --name "Operating Checking ****1234" \
   --type asset \
   --role bank_account \
   --sensitivity confidential \
-  --external-source mercury \
-  --external-id mercury-account-1 \
+  --external-source bank_provider \
+  --external-id bank-account-1 \
   --external-type bank_account \
-  --external-display-name "Mercury Operating Checking" \
-  --external-url https://dashboard.mercury.com/accounts/mercury-account-1 \
+  --external-display-name "Operating Checking" \
+  --external-url https://bank.example.com/accounts/bank-account-1 \
   --external-meta account_kind=checking \
   --external-meta "nickname=Operating Checking" \
   --external-meta 'mask=****1234' \
@@ -303,11 +303,11 @@ Stored account JSON includes:
   "role": "bank_account",
   "external_refs": [
     {
-      "source_system": "mercury",
-      "external_id": "mercury-account-1",
+      "source_system": "bank_provider",
+      "external_id": "bank-account-1",
       "external_type": "bank_account",
-      "display_name": "Mercury Operating Checking",
-      "url": "https://dashboard.mercury.com/accounts/mercury-account-1",
+      "display_name": "Operating Checking",
+      "url": "https://bank.example.com/accounts/bank-account-1",
       "metadata": {
         "account_kind": "checking",
         "nickname": "Operating Checking",
@@ -353,10 +353,10 @@ Add or update an external ref on an existing account:
 ```sh
 ./infobase --store .infobase --actor owner ledger account external-ref set \
   --account-id acct:OPERATING_BANK_ID \
-  --external-source mercury \
-  --external-id mercury-account-1 \
+  --external-source bank_provider \
+  --external-id bank-account-1 \
   --external-type bank_account \
-  --external-display-name "Mercury Operating Checking" \
+  --external-display-name "Operating Checking" \
   --external-meta account_kind=checking \
   --external-meta "nickname=Operating Checking" \
   --external-meta 'mask=****1234' \
@@ -375,12 +375,12 @@ Validation rules:
 
 ## Customer And Invoice Workflow
 
-Invoices are first-class source documents. Agents should create customers and invoices, then let InfoBase generate workflow-originated journal entries according to the active accounting basis.
+Invoices are first-class source documents. Agents should create customers and invoices, then let InfoBase generate workflow-originated journal entries according to the active accounting basis. InfoBase is bank and financial-institution agnostic: the AI bookkeeping agent interprets source-specific exports and submits normalized JSON with external references.
 
 Minimum account roles for service invoices:
 
 - `operating_cash` or `bank_account` for the payment/deposit account.
-- `default_service_revenue` or another revenue account on each invoice line.
+- `default_service_revenue`, `default_product_revenue`, or `other_income` on each invoice line.
 - `sales_tax_payable` when the invoice includes sales tax.
 - `accounts_receivable` when the book uses `accrual`.
 
@@ -391,7 +391,7 @@ Create or update a customer:
   "name": "Acme Co",
   "external_refs": [
     {
-      "source_system": "mercury",
+      "source_system": "billing_platform",
       "external_id": "customer-123",
       "external_type": "customer",
       "display_name": "Acme Co"
@@ -427,7 +427,7 @@ Create an invoice:
   "total_cents": 108500,
   "external_refs": [
     {
-      "source_system": "mercury",
+      "source_system": "billing_platform",
       "external_id": "invoice-1001",
       "external_type": "invoice"
     }
@@ -439,6 +439,65 @@ Create an invoice:
 ./infobase --store .infobase --actor bookkeeping-agent invoice create-json \
   --file ./invoice.json
 ```
+
+For source imports, prefer one normalized external invoice payload. This keeps source-specific parsing in the agent while giving InfoBase a first-class, idempotent workflow:
+
+```json
+{
+  "post": true,
+  "customer": {
+    "name": "Acme Co",
+    "external_refs": [
+      {
+        "source_system": "billing_platform",
+        "external_id": "customer-123",
+        "external_type": "customer",
+        "display_name": "Acme Co"
+      }
+    ]
+  },
+  "invoice": {
+    "invoice_number": "INV-1001",
+    "invoice_date": "2026-06-01",
+    "due_date": "2026-06-30",
+    "status": "paid",
+    "line_items": [
+      {
+        "description": "Services",
+        "revenue_account_id": "acct:SERVICE_REVENUE_ID",
+        "quantity": 1,
+        "unit_amount_cents": 100000,
+        "amount_cents": 100000
+      }
+    ],
+    "subtotal_cents": 100000,
+    "tax_amount_cents": 8500,
+    "total_cents": 108500,
+    "external_refs": [
+      {
+        "source_system": "billing_platform",
+        "external_id": "invoice-1001",
+        "external_type": "invoice"
+      }
+    ]
+  },
+  "payment": {
+    "date": "2026-06-15",
+    "amount_cents": 108500,
+    "cash_account_id": "acct:OPERATING_CASH_ID",
+    "external_source": "bank_feed",
+    "external_id": "txn-123",
+    "payment_evidence": "external_transaction_match"
+  }
+}
+```
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent invoice import-json \
+  --file ./external-invoice.json
+```
+
+`invoice import-json` upserts the customer by external reference, creates or reuses the invoice by external reference, posts it when `post` is true or the external status is `open`/`paid`, and marks it paid only when payment evidence and a cash/bank account are provided. A `paid` import without payment data is rejected instead of recording a paid status without accounting evidence.
 
 Post the invoice:
 
@@ -460,9 +519,9 @@ Mark the invoice paid:
   --cash-account-id acct:OPERATING_CASH_ID \
   --paid-date 2026-06-15 \
   --amount-cents 108500 \
-  --external-source mercury \
-  --external-id mercury-payment-123 \
-  --payment-evidence mercury_invoice_status
+  --external-source bank_feed \
+  --external-id txn-123 \
+  --payment-evidence external_transaction_match
 ```
 
 Payment behavior:
@@ -475,7 +534,9 @@ Workflow journals are stored with `origin: "workflow"`, `workflow`, `posting_sem
 List source documents:
 
 ```sh
+./infobase --store .infobase --actor bookkeeping-agent customer get --customer-id cust:...
 ./infobase --store .infobase --actor bookkeeping-agent customer list
+./infobase --store .infobase --actor bookkeeping-agent invoice get --invoice-id inv:...
 ./infobase --store .infobase --actor bookkeeping-agent invoice list
 ```
 
@@ -609,10 +670,13 @@ audit
 book settings get
 book settings set --accounting-basis cash|modified_cash|accrual
 customer create-json --file customer.json
+customer get --customer-id ID
 customer list
 invoice create-json --file invoice.json
+invoice import-json --file external-invoice.json
 invoice post --invoice-id ID
 invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
+invoice get --invoice-id ID
 invoice list
 rbac permissions
 rbac role set --name NAME --permissions p1,p2

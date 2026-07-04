@@ -694,6 +694,126 @@ func TestBookkeepingAgentCanUseInvoiceWorkflowButNotManualJournal(t *testing.T) 
 	}
 }
 
+func TestExternalInvoiceImportIsBankAgnosticAndIdempotent(t *testing.T) {
+	s, ctx := newTestStore(t)
+	cash := mustRoleAccount(t, s, ctx, "1010", "Operating Bank", AccountAsset, AccountRoleOperatingCash)
+	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	req := ExternalInvoiceImportRequest{
+		Post: true,
+		Customer: Customer{
+			Name: "External Customer",
+			ExternalRefs: []ExternalSourceRef{{
+				SourceSystem: "billing_platform",
+				ExternalID:   "customer-1",
+				ExternalType: "customer",
+			}},
+		},
+		Invoice: Invoice{
+			InvoiceNumber: "EXT-1001",
+			InvoiceDate:   "2026-06-01",
+			Status:        SourceDocumentPaid,
+			LineItems: []InvoiceLineItem{{
+				Description:      "Services",
+				RevenueAccountID: revenue.ID,
+				Quantity:         1,
+				UnitAmountCents:  100000,
+			}},
+			ExternalRefs: []ExternalSourceRef{{
+				SourceSystem: "billing_platform",
+				ExternalID:   "invoice-1001",
+				ExternalType: "invoice",
+			}},
+		},
+		Payment: &InvoicePaymentRequest{
+			Date:            "2026-06-15",
+			AmountCents:     100000,
+			CashAccountID:   cash.ID,
+			ExternalSource:  "bank_feed",
+			ExternalID:      "txn-1001",
+			PaymentEvidence: "external_transaction_match",
+		},
+	}
+	first, root, err := s.ImportExternalInvoice(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Posted || !first.Paid || first.Invoice.Status != SourceDocumentPaid {
+		t.Fatalf("expected posted paid import result: %#v", first)
+	}
+	second, secondRoot, err := s.ImportExternalInvoice(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Invoice.ID != first.Invoice.ID || second.Customer.ID != first.Customer.ID || secondRoot != root {
+		t.Fatalf("expected idempotent external import, first=%#v second=%#v root=%s secondRoot=%s", first, second, root, secondRoot)
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Customers) != 1 || len(st.Invoices) != 1 || len(st.JournalEntries) != 1 {
+		t.Fatalf("expected one customer, invoice, and payment journal; got customers=%d invoices=%d journals=%d", len(st.Customers), len(st.Invoices), len(st.JournalEntries))
+	}
+	for _, entry := range st.JournalEntries {
+		if entry.Origin != JournalOriginWorkflow || entry.Workflow != "invoice.mark_paid" || entry.SourceDocumentID != first.Invoice.ID {
+			t.Fatalf("unexpected workflow journal: %#v", entry)
+		}
+	}
+}
+
+func TestPaidExternalInvoiceImportRequiresPaymentEvidence(t *testing.T) {
+	s, ctx := newTestStore(t)
+	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	_, _, err := s.ImportExternalInvoice(ctx, ExternalInvoiceImportRequest{
+		Customer: Customer{Name: "Missing Payment Customer"},
+		Invoice: Invoice{
+			InvoiceNumber: "EXT-PAID-NO-PAYMENT",
+			InvoiceDate:   "2026-06-01",
+			Status:        SourceDocumentPaid,
+			LineItems: []InvoiceLineItem{{
+				Description:      "Services",
+				RevenueAccountID: revenue.ID,
+				Quantity:         1,
+				UnitAmountCents:  100000,
+			}},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected paid import without payment evidence to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrValidation || !strings.Contains(app.Message, "payment evidence") {
+		t.Fatalf("expected payment evidence validation error, got %#v", err)
+	}
+}
+
+func TestInvoiceLineRequiresRevenueRole(t *testing.T) {
+	s, ctx := newTestStore(t)
+	revenue := mustAccount(t, s, ctx, "Unclassified Revenue", AccountRevenue)
+	customer, _, err := s.UpsertCustomer(ctx, Customer{Name: "Role Check Customer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = s.CreateInvoice(ctx, Invoice{
+		InvoiceNumber: "INV-ROLE-1",
+		CustomerID:    customer.ID,
+		InvoiceDate:   "2026-06-01",
+		LineItems: []InvoiceLineItem{{
+			Description:      "Services",
+			RevenueAccountID: revenue.ID,
+			Quantity:         1,
+			UnitAmountCents:  100000,
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected invoice with unclassified revenue account to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrValidation || !strings.Contains(app.Message, "invoice revenue role") {
+		t.Fatalf("expected revenue role validation error, got %#v", err)
+	}
+}
+
 func assertPosting(t *testing.T, entry JournalEntry, accountID string, debit int64, credit int64) {
 	t.Helper()
 	for _, posting := range entry.Postings {

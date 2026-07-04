@@ -420,6 +420,120 @@ func TestCLIInvoiceWorkflowCreatesWorkflowJournal(t *testing.T) {
 	}
 }
 
+func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--number", "1010",
+		"--name", "Operating Bank",
+		"--type", "asset",
+		"--role", "operating_cash",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	cashID := extractNestedString(t, out.Bytes(), "account", "id")
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--number", "4000",
+		"--name", "Service Revenue",
+		"--type", "revenue",
+		"--role", "default_service_revenue",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	revenueID := extractNestedString(t, out.Bytes(), "account", "id")
+
+	importPath := filepath.Join(dir, "external-invoice.json")
+	importJSON := `{
+		"post": true,
+		"customer": {
+			"name": "Acme Co",
+			"external_refs": [{
+				"source_system": "billing_platform",
+				"external_id": "customer-1",
+				"external_type": "customer"
+			}]
+		},
+		"invoice": {
+			"invoice_number": "EXT-CLI-1",
+			"invoice_date": "2026-06-01",
+			"status": "paid",
+			"line_items": [{
+				"description": "Services",
+				"revenue_account_id": "` + revenueID + `",
+				"quantity": 1,
+				"unit_amount_cents": 125000
+			}],
+			"external_refs": [{
+				"source_system": "billing_platform",
+				"external_id": "invoice-1",
+				"external_type": "invoice"
+			}]
+		},
+		"payment": {
+			"date": "2026-06-15",
+			"amount_cents": 125000,
+			"cash_account_id": "` + cashID + `",
+			"external_source": "bank_feed",
+			"external_id": "txn-1",
+			"payment_evidence": "external_transaction_match"
+		}
+	}`
+	if err := os.WriteFile(importPath, []byte(importJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "invoice", "import-json", "--file", importPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	importResult := decoded["import"].(map[string]any)
+	invoice := importResult["invoice"].(map[string]any)
+	invoiceID := invoice["id"].(string)
+	if invoice["status"] != "paid" {
+		t.Fatalf("expected paid invoice import, got %#v", invoice)
+	}
+
+	out.Reset()
+	if err := run([]string{"--store", dir, "invoice", "import-json", "--file", importPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "invoice", "get", "--invoice-id", invoiceID}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var gotInvoice map[string]any
+	if err := json.Unmarshal(out.Bytes(), &gotInvoice); err != nil {
+		t.Fatal(err)
+	}
+	if gotInvoice["id"] != invoiceID || gotInvoice["status"] != "paid" {
+		t.Fatalf("unexpected invoice get response: %#v", gotInvoice)
+	}
+
+	out.Reset()
+	if err := run([]string{"--store", dir, "ledger", "journal", "list"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var journals map[string]map[string]any
+	if err := json.Unmarshal(out.Bytes(), &journals); err != nil {
+		t.Fatal(err)
+	}
+	if len(journals) != 1 {
+		t.Fatalf("expected one workflow journal after idempotent import retry, got %#v", journals)
+	}
+}
+
 func extractNestedString(t *testing.T, raw []byte, objectKey, fieldKey string) string {
 	t.Helper()
 	var decoded map[string]any

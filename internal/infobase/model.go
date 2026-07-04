@@ -141,6 +141,20 @@ type InvoicePayment struct {
 	PaymentEvidence string `json:"payment_evidence,omitempty"`
 }
 
+type ExternalInvoiceImportRequest struct {
+	Customer Customer               `json:"customer"`
+	Invoice  Invoice                `json:"invoice"`
+	Post     bool                   `json:"post"`
+	Payment  *InvoicePaymentRequest `json:"payment,omitempty"`
+}
+
+type ExternalInvoiceImportResult struct {
+	Customer Customer `json:"customer"`
+	Invoice  Invoice  `json:"invoice"`
+	Posted   bool     `json:"posted"`
+	Paid     bool     `json:"paid"`
+}
+
 type Invoice struct {
 	ID                     string               `json:"id"`
 	InvoiceNumber          string               `json:"invoice_number"`

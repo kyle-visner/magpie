@@ -26,6 +26,44 @@ type InvoicePaymentRequest struct {
 	PaymentEvidence string `json:"payment_evidence,omitempty"`
 }
 
+func (s *Store) GetCustomer(ctx Context, customerID string) (Customer, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return Customer{}, err
+	}
+	if err := EnsurePermission(st, ctx, PermissionLedgerRead); err != nil {
+		return Customer{}, err
+	}
+	customerID = strings.TrimSpace(customerID)
+	if customerID == "" {
+		return Customer{}, appErr(ErrValidation, "customer id is required")
+	}
+	customer, ok := st.Customers[customerID]
+	if !ok {
+		return Customer{}, appErr(ErrNotFound, "customer %s not found", customerID)
+	}
+	return customer, nil
+}
+
+func (s *Store) GetInvoice(ctx Context, invoiceID string) (Invoice, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return Invoice{}, err
+	}
+	if err := EnsurePermission(st, ctx, PermissionLedgerRead); err != nil {
+		return Invoice{}, err
+	}
+	invoiceID = strings.TrimSpace(invoiceID)
+	if invoiceID == "" {
+		return Invoice{}, appErr(ErrValidation, "invoice id is required")
+	}
+	invoice, ok := st.Invoices[invoiceID]
+	if !ok {
+		return Invoice{}, appErr(ErrNotFound, "invoice %s not found", invoiceID)
+	}
+	return invoice, nil
+}
+
 func (s *Store) UpsertCustomer(ctx Context, customer Customer) (Customer, string, error) {
 	st, err := s.LoadState()
 	if err != nil {
@@ -44,10 +82,19 @@ func (s *Store) UpsertCustomer(ctx Context, customer Customer) (Customer, string
 	}
 	now := s.now().UTC()
 	if strings.TrimSpace(customer.ID) == "" {
-		customer.ID = makeID("cust", strings.ToLower(customer.Name))
+		if existingID, ok := customerIDByExternalRefs(st, customer.ExternalRefs, ""); ok {
+			customer.ID = existingID
+		} else {
+			customer.ID = makeID("cust", strings.ToLower(customer.Name))
+		}
+	} else if existingID, ok := customerIDByExternalRefs(st, customer.ExternalRefs, customer.ID); ok {
+		return Customer{}, "", appErr(ErrConflict, "external ref already belongs to customer %s", existingID)
 	}
 	existing, exists := st.Customers[customer.ID]
 	if exists {
+		if existing.Name == customer.Name && externalRefsEqual(existing.ExternalRefs, customer.ExternalRefs) {
+			return existing, st.Root, nil
+		}
 		customer.CreatedAt = existing.CreatedAt
 		customer.CreatedBy = existing.CreatedBy
 	} else {
@@ -58,6 +105,69 @@ func (s *Store) UpsertCustomer(ctx Context, customer Customer) (Customer, string
 	customer.UpdatedBy = ctx.Actor
 	hash, err := s.appendEvent(ctx, "customer", customer.ID, "customer upsert", wrapEvent("customer.upsert", customerUpsertPayload{Customer: customer}), true)
 	return customer, hash, err
+}
+
+func (s *Store) ImportExternalInvoice(ctx Context, req ExternalInvoiceImportRequest) (ExternalInvoiceImportResult, string, error) {
+	if strings.TrimSpace(req.Customer.Name) == "" && strings.TrimSpace(req.Invoice.CustomerID) == "" {
+		return ExternalInvoiceImportResult{}, "", appErr(ErrValidation, "external invoice import requires a customer or customer_id")
+	}
+	if req.Invoice.Status == SourceDocumentPaid && (req.Payment == nil || strings.TrimSpace(req.Payment.PaymentEvidence) == "") {
+		return ExternalInvoiceImportResult{}, "", appErr(ErrValidation, "paid external invoice import requires payment evidence and cash account")
+	}
+	if req.Payment != nil && strings.TrimSpace(req.Payment.PaymentEvidence) == "" {
+		return ExternalInvoiceImportResult{}, "", appErr(ErrValidation, "external invoice payment import requires payment evidence")
+	}
+
+	root := ""
+	var customer Customer
+	var err error
+	if strings.TrimSpace(req.Customer.Name) != "" || len(req.Customer.ExternalRefs) > 0 || strings.TrimSpace(req.Customer.ID) != "" {
+		customer, root, err = s.UpsertCustomer(ctx, req.Customer)
+		if err != nil {
+			return ExternalInvoiceImportResult{}, "", err
+		}
+		req.Invoice.CustomerID = customer.ID
+	} else {
+		customer, err = s.GetCustomer(ctx, req.Invoice.CustomerID)
+		if err != nil {
+			return ExternalInvoiceImportResult{}, "", err
+		}
+	}
+
+	intendedStatus := req.Invoice.Status
+	if intendedStatus == "" {
+		intendedStatus = SourceDocumentImported
+	}
+	if intendedStatus == SourceDocumentPaid {
+		req.Invoice.Status = SourceDocumentImported
+	}
+
+	invoice, invoiceRoot, err := s.findOrCreateImportedInvoice(ctx, req.Invoice)
+	if err != nil {
+		return ExternalInvoiceImportResult{}, "", err
+	}
+	if invoiceRoot != "" {
+		root = invoiceRoot
+	}
+
+	result := ExternalInvoiceImportResult{Customer: customer, Invoice: invoice}
+	if req.Post || intendedStatus == SourceDocumentOpen || intendedStatus == SourceDocumentPaid {
+		invoice, root, err = s.PostInvoice(ctx, invoice.ID)
+		if err != nil {
+			return ExternalInvoiceImportResult{}, "", err
+		}
+		result.Posted = true
+		result.Invoice = invoice
+	}
+	if req.Payment != nil {
+		invoice, root, err = s.MarkInvoicePaid(ctx, invoice.ID, *req.Payment)
+		if err != nil {
+			return ExternalInvoiceImportResult{}, "", err
+		}
+		result.Paid = invoice.Status == SourceDocumentPaid
+		result.Invoice = invoice
+	}
+	return result, root, nil
 }
 
 func (s *Store) CreateInvoice(ctx Context, invoice Invoice) (Invoice, string, error) {
@@ -75,6 +185,9 @@ func (s *Store) CreateInvoice(ctx Context, invoice Invoice) (Invoice, string, er
 	if _, exists := st.Invoices[invoice.ID]; exists {
 		return Invoice{}, "", appErr(ErrConflict, "invoice already exists: %s", invoice.ID)
 	}
+	if existingID, ok := invoiceIDByExternalRefs(st, invoice.ExternalRefs, ""); ok {
+		return Invoice{}, "", appErr(ErrConflict, "external ref already belongs to invoice %s", existingID)
+	}
 	now := s.now().UTC()
 	invoice.CreatedAt = now
 	invoice.UpdatedAt = now
@@ -82,6 +195,27 @@ func (s *Store) CreateInvoice(ctx Context, invoice Invoice) (Invoice, string, er
 	invoice.UpdatedBy = ctx.Actor
 	hash, err := s.appendEvent(ctx, "invoice", invoice.ID, "invoice create", wrapEvent("invoice.create", invoiceCreatePayload{Invoice: invoice}), true)
 	return invoice, hash, err
+}
+
+func (s *Store) findOrCreateImportedInvoice(ctx Context, invoice Invoice) (Invoice, string, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return Invoice{}, "", err
+	}
+	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
+		return Invoice{}, "", err
+	}
+	invoice, err = normalizeInvoice(st, invoice)
+	if err != nil {
+		return Invoice{}, "", err
+	}
+	if existingID, ok := invoiceIDByExternalRefs(st, invoice.ExternalRefs, ""); ok {
+		return st.Invoices[existingID], st.Root, nil
+	}
+	if existing, ok := st.Invoices[invoice.ID]; ok {
+		return existing, st.Root, nil
+	}
+	return s.CreateInvoice(ctx, invoice)
 }
 
 func (s *Store) PostInvoice(ctx Context, invoiceID string) (Invoice, string, error) {
@@ -317,6 +451,9 @@ func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 		if account.Type != AccountRevenue {
 			return Invoice{}, appErr(ErrValidation, "invoice line %d account must be revenue", i)
 		}
+		if !invoiceRevenueRoles()[account.Role] {
+			return Invoice{}, appErr(ErrValidation, "invoice line %d revenue account must have an invoice revenue role", i)
+		}
 		subtotal += line.AmountCents
 	}
 	if invoice.SubtotalCents == 0 {
@@ -377,4 +514,68 @@ func accountIDByRole(st State, role AccountRole) (string, error) {
 		}
 	}
 	return "", appErr(ErrValidation, "required account role %q is not configured", role)
+}
+
+func invoiceRevenueRoles() map[AccountRole]bool {
+	return map[AccountRole]bool{
+		AccountRoleDefaultServiceRevenue: true,
+		AccountRoleDefaultProductRevenue: true,
+		AccountRoleOtherIncome:           true,
+	}
+}
+
+func customerIDByExternalRefs(st State, refs []ExternalSourceRef, currentCustomerID string) (string, bool) {
+	for _, ref := range refs {
+		key := externalRefKey(ref)
+		for _, existing := range st.Customers {
+			if existing.ID == currentCustomerID {
+				continue
+			}
+			for _, existingRef := range existing.ExternalRefs {
+				if externalRefKey(existingRef) == key {
+					return existing.ID, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+func invoiceIDByExternalRefs(st State, refs []ExternalSourceRef, currentInvoiceID string) (string, bool) {
+	for _, ref := range refs {
+		key := externalRefKey(ref)
+		for _, existing := range st.Invoices {
+			if existing.ID == currentInvoiceID {
+				continue
+			}
+			for _, existingRef := range existing.ExternalRefs {
+				if externalRefKey(existingRef) == key {
+					return existing.ID, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+func externalRefsEqual(a, b []ExternalSourceRef) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].SourceSystem != b[i].SourceSystem ||
+			a[i].ExternalID != b[i].ExternalID ||
+			a[i].ExternalType != b[i].ExternalType ||
+			a[i].DisplayName != b[i].DisplayName ||
+			a[i].URL != b[i].URL ||
+			len(a[i].Metadata) != len(b[i].Metadata) {
+			return false
+		}
+		for key, val := range a[i].Metadata {
+			if b[i].Metadata[key] != val {
+				return false
+			}
+		}
+	}
+	return true
 }

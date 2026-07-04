@@ -112,6 +112,17 @@ func (a app) customer(args []string, out io.Writer) error {
 			return err
 		}
 		return writeJSON(out, map[string]any{"root": root, "customer": created})
+	case "get":
+		fs := newFlagSet("customer get")
+		customerID := fs.String("customer-id", "", "InfoBase customer id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		customer, err := a.store.GetCustomer(a.ctx, *customerID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, customer)
 	case "list":
 		st, err := a.store.LoadState()
 		if err != nil {
@@ -146,6 +157,21 @@ func (a app) invoice(args []string, out io.Writer) error {
 			return err
 		}
 		return writeJSON(out, map[string]any{"root": root, "invoice": created})
+	case "import-json":
+		fs := newFlagSet("invoice import-json")
+		file := fs.String("file", "", "JSON file with normalized external invoice import; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var req infobase.ExternalInvoiceImportRequest
+		if err := readJSONFile(*file, &req); err != nil {
+			return err
+		}
+		result, root, err := a.store.ImportExternalInvoice(a.ctx, req)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "import": result})
 	case "post":
 		fs := newFlagSet("invoice post")
 		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
@@ -181,6 +207,17 @@ func (a app) invoice(args []string, out io.Writer) error {
 			return err
 		}
 		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
+	case "get":
+		fs := newFlagSet("invoice get")
+		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		invoice, err := a.store.GetInvoice(a.ctx, *invoiceID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, invoice)
 	case "list":
 		st, err := a.store.LoadState()
 		if err != nil {
@@ -303,7 +340,7 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 		typ := fs.String("type", "", "asset|liability|equity|revenue|expense")
 		role := fs.String("role", "", "account role, such as bank_account or accounts_receivable")
 		sensitivity := fs.String("sensitivity", "internal", "sensitivity label")
-		externalSource := fs.String("external-source", "", "external source system, such as mercury")
+		externalSource := fs.String("external-source", "", "external source system")
 		externalID := fs.String("external-id", "", "external source id")
 		externalType := fs.String("external-type", "", "external source type, such as bank_account or chart_account")
 		externalDisplayName := fs.String("external-display-name", "", "external display name")
@@ -415,7 +452,7 @@ func (a app) ledgerAccountExternalRef(args []string, out io.Writer) error {
 	}
 	fs := newFlagSet("ledger account external-ref set")
 	accountID := fs.String("account-id", "", "InfoBase account id")
-	externalSource := fs.String("external-source", "", "external source system, such as mercury")
+	externalSource := fs.String("external-source", "", "external source system")
 	externalID := fs.String("external-id", "", "external source id")
 	externalType := fs.String("external-type", "", "external source type, such as bank_account or chart_account")
 	externalDisplayName := fs.String("external-display-name", "", "external display name")
@@ -551,10 +588,13 @@ Commands:
   book settings get
   book settings set --accounting-basis cash|modified_cash|accrual
   customer create-json --file customer.json
+  customer get --customer-id ID
   customer list
   invoice create-json --file invoice.json
+  invoice import-json --file external-invoice.json
   invoice post --invoice-id ID
   invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
+  invoice get --invoice-id ID
   invoice list
   rbac permissions
   rbac role set --name NAME --permissions p1,p2
