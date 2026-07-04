@@ -430,6 +430,7 @@ func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 		return Invoice{}, appErr(ErrValidation, "invoice requires at least one line item")
 	}
 	var subtotal int64
+	var lineTaxTotal int64
 	for i := range invoice.LineItems {
 		line := &invoice.LineItems[i]
 		line.Description = strings.TrimSpace(line.Description)
@@ -451,6 +452,9 @@ func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 		if line.AmountCents != expected {
 			return Invoice{}, appErr(ErrValidation, "invoice line %d amount does not equal quantity times unit amount", i)
 		}
+		if line.TaxAmountCents < 0 {
+			return Invoice{}, appErr(ErrValidation, "invoice line %d tax cannot be negative", i)
+		}
 		account, ok := st.Accounts[line.RevenueAccountID]
 		if !ok {
 			return Invoice{}, appErr(ErrValidation, "invoice line %d revenue account %s not found", i, line.RevenueAccountID)
@@ -462,6 +466,7 @@ func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 			return Invoice{}, appErr(ErrValidation, "invoice line %d revenue account must have an invoice revenue role", i)
 		}
 		subtotal += line.AmountCents
+		lineTaxTotal += line.TaxAmountCents
 	}
 	if invoice.SubtotalCents == 0 {
 		invoice.SubtotalCents = subtotal
@@ -471,6 +476,12 @@ func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 	}
 	if invoice.TaxAmountCents < 0 {
 		return Invoice{}, appErr(ErrValidation, "invoice tax cannot be negative")
+	}
+	if invoice.TaxAmountCents == 0 && lineTaxTotal > 0 {
+		invoice.TaxAmountCents = lineTaxTotal
+	}
+	if invoice.TaxAmountCents > 0 && lineTaxTotal > 0 && invoice.TaxAmountCents != lineTaxTotal {
+		return Invoice{}, appErr(ErrValidation, "invoice tax does not equal line item tax total")
 	}
 	total := invoice.SubtotalCents + invoice.TaxAmountCents
 	if invoice.TotalCents == 0 {

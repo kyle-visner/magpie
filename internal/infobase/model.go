@@ -128,6 +128,7 @@ type InvoiceLineItem struct {
 	Quantity         int64  `json:"quantity"`
 	UnitAmountCents  int64  `json:"unit_amount_cents"`
 	AmountCents      int64  `json:"amount_cents"`
+	TaxAmountCents   int64  `json:"tax_amount_cents,omitempty"`
 }
 
 type InvoicePayment struct {

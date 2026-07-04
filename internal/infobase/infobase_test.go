@@ -869,6 +869,64 @@ func TestExternalInvoiceImportRequiresDefaultRevenueWhenLineOmitsAccount(t *test
 	}
 }
 
+func TestExternalInvoiceImportInfersTaxFromLineItems(t *testing.T) {
+	s, ctx := newTestStore(t)
+	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	customer, _, err := s.UpsertCustomer(ctx, Customer{Name: "Line Tax Customer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoice, _, err := s.CreateInvoice(ctx, Invoice{
+		InvoiceNumber: "INV-LINE-TAX-1",
+		CustomerID:    customer.ID,
+		InvoiceDate:   "2026-06-01",
+		LineItems: []InvoiceLineItem{{
+			Description:      "Taxable services",
+			RevenueAccountID: revenue.ID,
+			Quantity:         1,
+			UnitAmountCents:  50000,
+			TaxAmountCents:   5275,
+		}},
+		TotalCents: 55275,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invoice.SubtotalCents != 50000 || invoice.TaxAmountCents != 5275 || invoice.TotalCents != 55275 {
+		t.Fatalf("expected tax inferred from line item, got %#v", invoice)
+	}
+}
+
+func TestExternalInvoiceImportRejectsMismatchedLineTax(t *testing.T) {
+	s, ctx := newTestStore(t)
+	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	customer, _, err := s.UpsertCustomer(ctx, Customer{Name: "Mismatched Tax Customer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = s.CreateInvoice(ctx, Invoice{
+		InvoiceNumber:  "INV-LINE-TAX-BAD",
+		CustomerID:     customer.ID,
+		InvoiceDate:    "2026-06-01",
+		TaxAmountCents: 6000,
+		LineItems: []InvoiceLineItem{{
+			Description:      "Taxable services",
+			RevenueAccountID: revenue.ID,
+			Quantity:         1,
+			UnitAmountCents:  50000,
+			TaxAmountCents:   5275,
+		}},
+		TotalCents: 56000,
+	})
+	if err == nil {
+		t.Fatal("expected mismatched invoice and line tax to fail")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrValidation || !strings.Contains(app.Message, "line item tax total") {
+		t.Fatalf("expected line tax validation error, got %#v", err)
+	}
+}
+
 func TestPaidExternalInvoiceImportRequiresPaymentEvidence(t *testing.T) {
 	s, ctx := newTestStore(t)
 	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)

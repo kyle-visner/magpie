@@ -395,7 +395,7 @@ Minimum account roles for service invoices:
 - `sales_tax_payable` when the invoice includes sales tax.
 - `accounts_receivable` when the book uses `accrual`.
 
-For normalized external imports, line-level `revenue_account_id` may be omitted. InfoBase resolves omitted revenue accounts to the configured `default_service_revenue` account and fails the import if that role is not configured.
+For normalized external imports, line-level `revenue_account_id` may be omitted. InfoBase resolves omitted revenue accounts to the configured `default_service_revenue` account and fails the import if that role is not configured. Line-level `tax_amount_cents` may also be supplied; InfoBase sums line taxes into invoice-level `tax_amount_cents` when the invoice-level value is omitted, and rejects mismatches when both are present.
 
 Create or update a customer:
 
@@ -479,11 +479,11 @@ For source imports, prefer one normalized external invoice payload. This keeps s
         "description": "Services",
         "quantity": 1,
         "unit_amount_cents": 100000,
-        "amount_cents": 100000
+        "amount_cents": 100000,
+        "tax_amount_cents": 8500
       }
     ],
     "subtotal_cents": 100000,
-    "tax_amount_cents": 8500,
     "total_cents": 108500,
     "external_refs": [
       {

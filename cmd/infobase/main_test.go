@@ -510,6 +510,17 @@ func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	revenueID := extractNestedString(t, out.Bytes(), "account", "id")
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--number", "2100",
+		"--name", "Sales Tax Payable",
+		"--type", "liability",
+		"--role", "sales_tax_payable",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
 
 	importPath := filepath.Join(dir, "external-invoice.json")
 	importJSON := `{
@@ -529,8 +540,10 @@ func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
 			"line_items": [{
 				"description": "Services",
 				"quantity": 1,
-				"unit_amount_cents": 125000
+				"unit_amount_cents": 125000,
+				"tax_amount_cents": 6875
 			}],
+			"total_cents": 131875,
 			"external_refs": [{
 				"source_system": "billing_platform",
 				"external_id": "invoice-1",
@@ -539,7 +552,7 @@ func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
 		},
 		"payment": {
 			"date": "2026-06-15",
-			"amount_cents": 125000,
+			"amount_cents": 131875,
 			"cash_account_id": "` + cashID + `",
 			"external_source": "bank_feed",
 			"external_id": "txn-1",
@@ -567,6 +580,9 @@ func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
 	line := lines[0].(map[string]any)
 	if line["revenue_account_id"] != revenueID {
 		t.Fatalf("expected default revenue fallback %s, got %#v", revenueID, line)
+	}
+	if invoice["tax_amount_cents"] != float64(6875) || invoice["total_cents"] != float64(131875) {
+		t.Fatalf("expected invoice tax inferred from line tax, got %#v", invoice)
 	}
 
 	out.Reset()
