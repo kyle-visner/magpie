@@ -307,6 +307,15 @@ func (a app) rbac(args []string, out io.Writer) error {
 			return err
 		}
 		return writeJSON(out, map[string]any{"root": hash, "role": *name})
+	case "defaults":
+		if len(args) < 2 || args[1] != "repair" {
+			return fmt.Errorf("usage: rbac defaults repair")
+		}
+		result, root, err := a.store.RepairDefaultRoles(a.ctx)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "repair": result})
 	case "permissions":
 		return writeJSON(out, infobase.PermissionNames())
 	default:
@@ -457,19 +466,20 @@ func (a app) ledgerAccountExternalRef(args []string, out io.Writer) error {
 	externalType := fs.String("external-type", "", "external source type, such as bank_account or chart_account")
 	externalDisplayName := fs.String("external-display-name", "", "external display name")
 	externalURL := fs.String("external-url", "", "external source URL")
+	role := fs.String("role", "", "optional account role to assign with this external ref")
 	externalMetadata := metadataFlag{}
 	fs.Var(&externalMetadata, "external-meta", "external metadata key=value; may be repeated")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	account, root, err := a.store.SetAccountExternalRef(a.ctx, *accountID, infobase.ExternalSourceRef{
+	account, root, err := a.store.SetAccountExternalRefWithRole(a.ctx, *accountID, infobase.ExternalSourceRef{
 		SourceSystem: *externalSource,
 		ExternalID:   *externalID,
 		ExternalType: *externalType,
 		DisplayName:  *externalDisplayName,
 		URL:          *externalURL,
 		Metadata:     externalMetadata,
-	})
+	}, infobase.AccountRole(*role))
 	if err != nil {
 		return err
 	}
@@ -596,6 +606,7 @@ Commands:
   invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
   invoice get --invoice-id ID
   invoice list
+  rbac defaults repair
   rbac permissions
   rbac role set --name NAME --permissions p1,p2
   rbac user set --id ID --role ROLE
@@ -604,7 +615,7 @@ Commands:
   ledger account number set --account-id ID --number NUMBER
   ledger account role list
   ledger account role set --account-id ID --role ROLE
-  ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID
+  ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID [--role ROLE]
   ledger account list
   ledger journal create --file entry.json
   ledger journal list

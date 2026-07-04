@@ -16,6 +16,10 @@ type userUpsertPayload struct {
 	User User `json:"user"`
 }
 
+type DefaultRoleRepairResult struct {
+	Roles map[string]Role `json:"roles"`
+}
+
 func initEvent() eventEnvelope {
 	roles := defaultRoles()
 	return wrapEvent("init", initPayload{
@@ -114,6 +118,39 @@ func (s *Store) UpsertRole(ctx Context, role Role) (string, error) {
 	return s.appendEvent(ctx, "rbac.role", "role:"+role.Name, "rbac role upsert", wrapEvent("role.upsert", roleUpsertPayload{Role: role}), true)
 }
 
+func (s *Store) RepairDefaultRoles(ctx Context) (DefaultRoleRepairResult, string, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return DefaultRoleRepairResult{}, "", err
+	}
+	if err := EnsurePermission(st, ctx, PermissionRBACManage); err != nil {
+		return DefaultRoleRepairResult{}, "", err
+	}
+	repairedRoles := map[string]Role{}
+	root := st.Root
+	for name, defaultRole := range defaultRoles() {
+		current, exists := st.Roles[name]
+		if !exists {
+			current = Role{Name: name}
+		}
+		repaired := Role{
+			Name:        name,
+			Permissions: mergePermissions(current.Permissions, defaultRole.Permissions),
+		}
+		if exists && current.Name == repaired.Name && samePermissions(current.Permissions, repaired.Permissions) {
+			continue
+		}
+		hash, err := s.appendEvent(ctx, "rbac.role", "role:"+name, "rbac defaults repair", wrapEvent("role.upsert", roleUpsertPayload{Role: repaired}), true)
+		if err != nil {
+			return DefaultRoleRepairResult{}, "", err
+		}
+		root = hash
+		st.Roles[name] = repaired
+		repairedRoles[name] = repaired
+	}
+	return DefaultRoleRepairResult{Roles: repairedRoles}, root, nil
+}
+
 func (s *Store) UpsertUser(ctx Context, user User) (string, error) {
 	st, err := s.LoadState()
 	if err != nil {
@@ -140,4 +177,38 @@ func PermissionNames() []string {
 	}
 	sort.Strings(perms)
 	return perms
+}
+
+func mergePermissions(existing []Permission, required []Permission) []Permission {
+	seen := map[Permission]bool{}
+	merged := make([]Permission, 0, len(existing)+len(required))
+	for _, permission := range existing {
+		if seen[permission] {
+			continue
+		}
+		seen[permission] = true
+		merged = append(merged, permission)
+	}
+	for _, permission := range required {
+		if seen[permission] {
+			continue
+		}
+		seen[permission] = true
+		merged = append(merged, permission)
+	}
+	return sortedPermissions(merged)
+}
+
+func samePermissions(a []Permission, b []Permission) bool {
+	a = sortedPermissions(a)
+	b = sortedPermissions(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

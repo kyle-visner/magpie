@@ -293,6 +293,7 @@ func TestCLIUpdatesExistingAccountExternalRefMetadata(t *testing.T) {
 		"--external-id", "mercury-account-1",
 		"--external-type", "bank_account",
 		"--external-display-name", "Mercury Operating Checking",
+		"--role", "bank_account",
 		"--external-meta", "last_four=1234",
 		"--external-meta", "nickname=Operating Updated",
 	}, &out); err != nil {
@@ -303,6 +304,9 @@ func TestCLIUpdatesExistingAccountExternalRefMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	account := decoded["account"].(map[string]any)
+	if account["role"] != "bank_account" {
+		t.Fatalf("expected role to be assigned with external ref, got %#v", account)
+	}
 	externalRefs := account["external_refs"].([]any)
 	external := externalRefs[0].(map[string]any)
 	metadata := external["metadata"].(map[string]any)
@@ -310,6 +314,62 @@ func TestCLIUpdatesExistingAccountExternalRefMetadata(t *testing.T) {
 		external["external_id"] != "mercury-account-1" ||
 		metadata["nickname"] != "Operating Updated" {
 		t.Fatalf("unexpected updated external ref: %#v", external)
+	}
+}
+
+func TestCLIRepairsLegacyDefaultRoles(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	staleOwnerPermissions := "admin:recover,audit:read,journal:adjust,ledger:read,ledger:write,notes:read,notes:write,rbac:manage,settings:manage,snapshot:create"
+	if err := run([]string{
+		"--store", dir,
+		"rbac", "role", "set",
+		"--name", "Owner",
+		"--permissions", staleOwnerPermissions,
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--name", "Blocked Service Revenue",
+		"--type", "revenue",
+		"--role", "default_service_revenue",
+	}, &out); err == nil {
+		t.Fatal("expected stale Owner role without chart:manage to be denied role assignment")
+	}
+
+	out.Reset()
+	if err := run([]string{"--store", dir, "rbac", "defaults", "repair"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	repair := decoded["repair"].(map[string]any)
+	roles := repair["roles"].(map[string]any)
+	if _, ok := roles["Owner"]; !ok {
+		t.Fatalf("expected Owner repair result, got %#v", repair)
+	}
+
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--name", "Service Revenue",
+		"--type", "revenue",
+		"--role", "default_service_revenue",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := extractNestedString(t, out.Bytes(), "account", "role"); got != "default_service_revenue" {
+		t.Fatalf("expected repaired Owner to assign account role, got %q", got)
 	}
 }
 

@@ -112,6 +112,14 @@ Built-in roles:
 - `Operations`: notes read/write only.
 - `Sales Rep`: notes read/write only.
 
+Stores initialized before new built-in permissions were added can repair default roles without changing custom roles or users:
+
+```sh
+./infobase --store .infobase --actor owner rbac defaults repair
+```
+
+The repair command requires `rbac:manage`, adds missing current default permissions to built-in roles, and preserves any existing extra permissions on those roles.
+
 To define a custom role:
 
 ```sh
@@ -357,11 +365,14 @@ Add or update an external ref on an existing account:
   --external-id bank-account-1 \
   --external-type bank_account \
   --external-display-name "Operating Checking" \
+  --role bank_account \
   --external-meta account_kind=checking \
   --external-meta "nickname=Operating Checking" \
   --external-meta 'mask=****1234' \
   --external-meta last_four=1234
 ```
+
+`--role` is optional. When present, the actor must have `chart:manage`, and the role/type/uniqueness checks are applied in the same account update as the external reference.
 
 If the account already has a ref with the same `source_system + external_id`, the command replaces that ref. If another account already has that ref, the command fails with a conflict.
 
@@ -678,6 +689,7 @@ invoice post --invoice-id ID
 invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
 invoice get --invoice-id ID
 invoice list
+rbac defaults repair
 rbac permissions
 rbac role set --name NAME --permissions p1,p2
 rbac user set --id ID --role ROLE
@@ -686,7 +698,7 @@ ledger account create-json --file account.json
 ledger account number set --account-id ID --number NUMBER
 ledger account role list
 ledger account role set --account-id ID --role ROLE
-ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID
+ledger account external-ref set --account-id ID --external-source SOURCE --external-id ID [--role ROLE]
 ledger account list
 ledger journal create --file entry.json
 ledger journal list

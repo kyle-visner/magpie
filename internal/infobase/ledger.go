@@ -179,12 +179,29 @@ func (s *Store) SetAccountRole(ctx Context, accountID string, role AccountRole) 
 }
 
 func (s *Store) SetAccountExternalRef(ctx Context, accountID string, ref ExternalSourceRef) (Account, string, error) {
+	return s.setAccountExternalRef(ctx, accountID, ref, "")
+}
+
+func (s *Store) SetAccountExternalRefWithRole(ctx Context, accountID string, ref ExternalSourceRef, role AccountRole) (Account, string, error) {
+	return s.setAccountExternalRef(ctx, accountID, ref, role)
+}
+
+func (s *Store) setAccountExternalRef(ctx Context, accountID string, ref ExternalSourceRef, role AccountRole) (Account, string, error) {
 	st, err := s.LoadState()
 	if err != nil {
 		return Account{}, "", err
 	}
 	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
 		return Account{}, "", err
+	}
+	normalizedRole, err := normalizeAccountRole(role)
+	if err != nil {
+		return Account{}, "", err
+	}
+	if normalizedRole != "" {
+		if err := EnsurePermission(st, ctx, PermissionChartManage); err != nil {
+			return Account{}, "", err
+		}
 	}
 	accountID = strings.TrimSpace(accountID)
 	if accountID == "" {
@@ -193,6 +210,15 @@ func (s *Store) SetAccountExternalRef(ctx Context, accountID string, ref Externa
 	account, ok := st.Accounts[accountID]
 	if !ok {
 		return Account{}, "", appErr(ErrNotFound, "account %s not found", accountID)
+	}
+	if normalizedRole != "" {
+		if err := validateAccountRoleForType(normalizedRole, account.Type); err != nil {
+			return Account{}, "", err
+		}
+		if err := ensureAccountRoleAvailable(st, accountID, normalizedRole); err != nil {
+			return Account{}, "", err
+		}
+		account.Role = normalizedRole
 	}
 	normalized, empty, err := normalizeExternalRef(ref)
 	if err != nil {

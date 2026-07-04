@@ -349,6 +349,89 @@ func TestAccountRoleMutationRequiresChartManage(t *testing.T) {
 	}
 }
 
+func TestRepairDefaultRolesAddsMissingChartManageForLegacyStores(t *testing.T) {
+	s, owner := newTestStore(t)
+	if _, err := s.UpsertRole(owner, Role{
+		Name: "Owner",
+		Permissions: []Permission{
+			PermissionLedgerRead,
+			PermissionLedgerWrite,
+			PermissionNotesRead,
+			PermissionNotesWrite,
+			PermissionRBACManage,
+			PermissionSnapshot,
+			PermissionAuditRead,
+			PermissionAdminRecover,
+			PermissionSettingsManage,
+			PermissionJournalAdjust,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertRole(owner, Role{
+		Name: "Admin",
+		Permissions: []Permission{
+			PermissionLedgerRead,
+			PermissionLedgerWrite,
+			PermissionRBACManage,
+			PermissionAdminRecover,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := s.CreateAccountWithDetails(owner, Account{
+		Name:        "Blocked Classified Revenue",
+		Type:        AccountRevenue,
+		Role:        AccountRoleDefaultServiceRevenue,
+		Sensitivity: "confidential",
+	})
+	if err == nil {
+		t.Fatal("expected legacy Owner role without chart:manage to be denied classified account creation")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrPermission {
+		t.Fatalf("expected permission error, got %#v", err)
+	}
+
+	repair, _, err := s.RepairDefaultRoles(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := repair.Roles["Owner"]; !ok {
+		t.Fatalf("expected Owner to be repaired, got %#v", repair)
+	}
+	if _, ok := repair.Roles["Admin"]; !ok {
+		t.Fatalf("expected Admin to be repaired, got %#v", repair)
+	}
+
+	account, _, err := s.CreateAccountWithDetails(owner, Account{
+		Name:        "Service Revenue",
+		Type:        AccountRevenue,
+		Role:        AccountRoleDefaultServiceRevenue,
+		Sensitivity: "confidential",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.Role != AccountRoleDefaultServiceRevenue {
+		t.Fatalf("expected role after repair, got %#v", account)
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !roleHasPermission(st.Roles["Owner"], PermissionChartManage) {
+		t.Fatalf("expected repaired Owner chart:manage, got %#v", st.Roles["Owner"])
+	}
+	if !roleHasPermission(st.Roles["Admin"], PermissionChartManage) || !roleHasPermission(st.Roles["Admin"], PermissionAdminRecover) {
+		t.Fatalf("expected repaired Admin to preserve existing permissions and add defaults, got %#v", st.Roles["Admin"])
+	}
+	if roleHasPermission(st.Roles["Accountant"], PermissionChartManage) {
+		t.Fatalf("Accountant should not gain chart:manage during default repair: %#v", st.Roles["Accountant"])
+	}
+}
+
 func TestManualJournalRequiresJournalAdjustAndReason(t *testing.T) {
 	s, owner := newTestStore(t)
 	if _, err := s.UpsertRole(owner, Role{
@@ -822,6 +905,15 @@ func assertPosting(t *testing.T, entry JournalEntry, accountID string, debit int
 		}
 	}
 	t.Fatalf("expected posting account=%s debit=%d credit=%d in %#v", accountID, debit, credit, entry.Postings)
+}
+
+func roleHasPermission(role Role, permission Permission) bool {
+	for _, p := range role.Permissions {
+		if p == permission {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAccountExternalRefsAreStructuredAndUnique(t *testing.T) {
