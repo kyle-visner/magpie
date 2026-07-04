@@ -132,14 +132,18 @@ type InvoiceLineItem struct {
 }
 
 type InvoicePayment struct {
-	ID              string `json:"id"`
-	Date            string `json:"date"`
-	AmountCents     int64  `json:"amount_cents"`
-	CashAccountID   string `json:"cash_account_id"`
-	JournalEntryID  string `json:"journal_entry_id,omitempty"`
-	ExternalSource  string `json:"external_source,omitempty"`
-	ExternalID      string `json:"external_id,omitempty"`
-	PaymentEvidence string `json:"payment_evidence,omitempty"`
+	ID                     string `json:"id"`
+	Date                   string `json:"date"`
+	AmountCents            int64  `json:"amount_cents"`
+	CashAccountID          string `json:"cash_account_id"`
+	JournalEntryID         string `json:"journal_entry_id,omitempty"`
+	ExternalSource         string `json:"external_source,omitempty"`
+	ExternalID             string `json:"external_id,omitempty"`
+	PaymentEvidence        string `json:"payment_evidence,omitempty"`
+	Reversed               bool   `json:"reversed,omitempty"`
+	ReversalDate           string `json:"reversal_date,omitempty"`
+	ReversalReason         string `json:"reversal_reason,omitempty"`
+	ReversalJournalEntryID string `json:"reversal_journal_entry_id,omitempty"`
 }
 
 type ExternalInvoiceImportRequest struct {

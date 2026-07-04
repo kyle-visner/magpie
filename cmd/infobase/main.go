@@ -207,6 +207,26 @@ func (a app) invoice(args []string, out io.Writer) error {
 			return err
 		}
 		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
+	case "reverse-payment":
+		fs := newFlagSet("invoice reverse-payment")
+		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		paymentID := fs.String("payment-id", "", "InfoBase payment id")
+		journalEntryID := fs.String("journal-entry-id", "", "payment journal entry id")
+		date := fs.String("reversal-date", "", "reversal date YYYY-MM-DD")
+		reason := fs.String("reason", "", "reason for reversal")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		invoice, root, err := a.store.ReverseInvoicePayment(a.ctx, *invoiceID, infobase.InvoicePaymentReversalRequest{
+			PaymentID:      *paymentID,
+			JournalEntryID: *journalEntryID,
+			Date:           *date,
+			Reason:         *reason,
+		})
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
 	case "get":
 		fs := newFlagSet("invoice get")
 		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
@@ -604,6 +624,7 @@ Commands:
   invoice import-json --file external-invoice.json
   invoice post --invoice-id ID
   invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
+  invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
   invoice get --invoice-id ID
   invoice list
   rbac defaults repair

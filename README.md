@@ -541,6 +541,18 @@ Payment behavior:
 - `cash` and `modified_cash`: creates a workflow journal that debits cash, credits revenue, and credits `sales_tax_payable` when tax is present. A/R is not used.
 - `accrual`: requires the invoice to be posted first, then creates a workflow journal that debits cash and credits `accounts_receivable`.
 
+Reverse an incorrect payment:
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent invoice reverse-payment \
+  --invoice-id inv:... \
+  --payment-id pay:... \
+  --reversal-date 2026-06-16 \
+  --reason "invoice was incorrectly marked paid"
+```
+
+Payment reversals create a new workflow journal that exactly offsets the original payment journal. The original payment and journal remain in the audit trail; the payment is marked reversed and the invoice status is recomputed from non-reversed payments.
+
 Workflow journals are stored with `origin: "workflow"`, `workflow`, `posting_semantics`, `source_document_type`, and `source_document_id`. Invoice workflow writes are idempotent by source key so agents can retry safely.
 
 List source documents:
@@ -688,6 +700,7 @@ invoice create-json --file invoice.json
 invoice import-json --file external-invoice.json
 invoice post --invoice-id ID
 invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
+invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
 invoice get --invoice-id ID
 invoice list
 rbac defaults repair

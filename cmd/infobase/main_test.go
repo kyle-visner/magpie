@@ -576,6 +576,9 @@ func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
 	if invoice["status"] != "paid" {
 		t.Fatalf("expected paid invoice import, got %#v", invoice)
 	}
+	payments := invoice["payments"].([]any)
+	payment := payments[0].(map[string]any)
+	paymentID := payment["id"].(string)
 	lines := invoice["line_items"].([]any)
 	line := lines[0].(map[string]any)
 	if line["revenue_account_id"] != revenueID {
@@ -602,6 +605,31 @@ func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
 	}
 
 	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"invoice", "reverse-payment",
+		"--invoice-id", invoiceID,
+		"--payment-id", paymentID,
+		"--reversal-date", "2026-06-16",
+		"--reason", "invoice was incorrectly marked paid",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var reversedResp map[string]any
+	if err := json.Unmarshal(out.Bytes(), &reversedResp); err != nil {
+		t.Fatal(err)
+	}
+	reversed := reversedResp["invoice"].(map[string]any)
+	if reversed["status"] != "open" {
+		t.Fatalf("expected reversed invoice to reopen, got %#v", reversed)
+	}
+	reversedPayments := reversed["payments"].([]any)
+	reversedPayment := reversedPayments[0].(map[string]any)
+	if reversedPayment["reversed"] != true || reversedPayment["reversal_journal_entry_id"] == "" {
+		t.Fatalf("expected reversed payment metadata, got %#v", reversedPayment)
+	}
+
+	out.Reset()
 	if err := run([]string{"--store", dir, "ledger", "journal", "list"}, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -609,8 +637,8 @@ func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &journals); err != nil {
 		t.Fatal(err)
 	}
-	if len(journals) != 1 {
-		t.Fatalf("expected one workflow journal after idempotent import retry, got %#v", journals)
+	if len(journals) != 2 {
+		t.Fatalf("expected payment and reversal workflow journals after idempotent import retry, got %#v", journals)
 	}
 }
 

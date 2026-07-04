@@ -642,6 +642,90 @@ func TestAccrualInvoicePostAndPaymentUseAccountsReceivable(t *testing.T) {
 	assertPosting(t, payment, ar.ID, 0, 108500)
 }
 
+func TestInvoicePaymentReversalCreatesOffsettingWorkflowJournal(t *testing.T) {
+	s, ctx := newTestStore(t)
+	cash := mustRoleAccount(t, s, ctx, "1010", "Operating Bank", AccountAsset, AccountRoleOperatingCash)
+	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	tax := mustRoleAccount(t, s, ctx, "2100", "Sales Tax Payable", AccountLiability, AccountRoleSalesTaxPayable)
+	customer, _, err := s.UpsertCustomer(ctx, Customer{Name: "Reverse Payment Customer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoice, _, err := s.CreateInvoice(ctx, Invoice{
+		InvoiceNumber: "INV-REV-1",
+		CustomerID:    customer.ID,
+		InvoiceDate:   "2026-06-01",
+		LineItems: []InvoiceLineItem{{
+			Description:      "Services",
+			RevenueAccountID: revenue.ID,
+			Quantity:         1,
+			UnitAmountCents:  100000,
+			AmountCents:      100000,
+		}},
+		SubtotalCents:  100000,
+		TaxAmountCents: 8500,
+		TotalCents:     108500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PostInvoice(ctx, invoice.ID); err != nil {
+		t.Fatal(err)
+	}
+	paid, _, err := s.MarkInvoicePaid(ctx, invoice.ID, InvoicePaymentRequest{
+		Date:          "2026-06-15",
+		AmountCents:   108500,
+		CashAccountID: cash.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymentID := paid.Payments[0].ID
+	reversed, root, err := s.ReverseInvoicePayment(ctx, invoice.ID, InvoicePaymentReversalRequest{
+		PaymentID: paymentID,
+		Date:      "2026-06-16",
+		Reason:    "invoice was incorrectly marked paid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reversed.Status != SourceDocumentOpen || !reversed.Payments[0].Reversed {
+		t.Fatalf("expected invoice reopened with reversed payment, got %#v", reversed)
+	}
+	reversalID := reversed.Payments[0].ReversalJournalEntryID
+	if reversalID == "" {
+		t.Fatalf("expected reversal journal id on payment: %#v", reversed.Payments[0])
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reversal := st.JournalEntries[reversalID]
+	if reversal.Origin != JournalOriginWorkflow ||
+		reversal.Workflow != "invoice.reverse_payment" ||
+		reversal.PostingSemantics != "invoice_payment_reversed" ||
+		reversal.SourceDocumentID != invoice.ID ||
+		reversal.Metadata["payment_id"] != paymentID ||
+		reversal.Metadata["reason"] != "invoice was incorrectly marked paid" {
+		t.Fatalf("unexpected reversal journal metadata: %#v", reversal)
+	}
+	assertPosting(t, reversal, cash.ID, 0, 108500)
+	assertPosting(t, reversal, revenue.ID, 100000, 0)
+	assertPosting(t, reversal, tax.ID, 8500, 0)
+
+	reversedAgain, rootAgain, err := s.ReverseInvoicePayment(ctx, invoice.ID, InvoicePaymentReversalRequest{
+		PaymentID: paymentID,
+		Date:      "2026-06-16",
+		Reason:    "invoice was incorrectly marked paid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reversedAgain.Payments[0].ReversalJournalEntryID != reversalID || rootAgain != root {
+		t.Fatalf("expected idempotent payment reversal, got invoice=%#v root=%s rootAgain=%s", reversedAgain, root, rootAgain)
+	}
+}
+
 func TestModifiedCashInvoicePaidTracksTaxWithoutAccountsReceivable(t *testing.T) {
 	s, ctx := newTestStore(t)
 	if _, _, err := s.SetAccountingBasis(ctx, AccountingBasisModifiedCash); err != nil {

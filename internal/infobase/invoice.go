@@ -26,6 +26,13 @@ type InvoicePaymentRequest struct {
 	PaymentEvidence string `json:"payment_evidence,omitempty"`
 }
 
+type InvoicePaymentReversalRequest struct {
+	PaymentID      string `json:"payment_id,omitempty"`
+	JournalEntryID string `json:"journal_entry_id,omitempty"`
+	Date           string `json:"date"`
+	Reason         string `json:"reason"`
+}
+
 func (s *Store) GetCustomer(ctx Context, customerID string) (Customer, error) {
 	st, err := s.LoadState()
 	if err != nil {
@@ -389,14 +396,104 @@ func (s *Store) MarkInvoicePaid(ctx Context, invoiceID string, req InvoicePaymen
 	}
 	invoice.Payments = append(invoice.Payments, payment)
 	invoice.PaymentJournalEntryIDs = append(invoice.PaymentJournalEntryIDs, entry.ID)
-	if invoicePaidAmount(invoice) == invoice.TotalCents {
-		invoice.Status = SourceDocumentPaid
-	} else {
-		invoice.Status = SourceDocumentOpen
-	}
+	invoice.Status = invoiceStatusFromPayments(invoice)
 	invoice.UpdatedAt = s.now().UTC()
 	invoice.UpdatedBy = ctx.Actor
 	hash, err := s.appendEvent(ctx, "invoice", invoice.ID, "invoice mark-paid", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), true)
+	if err != nil {
+		return Invoice{}, "", err
+	}
+	if hash != "" {
+		root = hash
+	}
+	return invoice, root, nil
+}
+
+func (s *Store) ReverseInvoicePayment(ctx Context, invoiceID string, req InvoicePaymentReversalRequest) (Invoice, string, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return Invoice{}, "", err
+	}
+	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
+		return Invoice{}, "", err
+	}
+	invoiceID = strings.TrimSpace(invoiceID)
+	if invoiceID == "" {
+		return Invoice{}, "", appErr(ErrValidation, "invoice id is required")
+	}
+	invoice, ok := st.Invoices[invoiceID]
+	if !ok {
+		return Invoice{}, "", appErr(ErrNotFound, "invoice %s not found", invoiceID)
+	}
+	if invoice.Status == SourceDocumentVoid {
+		return Invoice{}, "", appErr(ErrValidation, "void invoice payment cannot be reversed")
+	}
+	req.PaymentID = strings.TrimSpace(req.PaymentID)
+	req.JournalEntryID = strings.TrimSpace(req.JournalEntryID)
+	if req.PaymentID == "" && req.JournalEntryID == "" {
+		return Invoice{}, "", appErr(ErrValidation, "payment_id or journal_entry_id is required")
+	}
+	req.Date = strings.TrimSpace(req.Date)
+	if req.Date == "" {
+		req.Date = s.now().UTC().Format("2006-01-02")
+	}
+	if _, err := time.Parse("2006-01-02", req.Date); err != nil {
+		return Invoice{}, "", appErr(ErrValidation, "reversal date must use YYYY-MM-DD")
+	}
+	req.Reason = strings.TrimSpace(req.Reason)
+	if req.Reason == "" {
+		return Invoice{}, "", appErr(ErrValidation, "payment reversal reason is required")
+	}
+	paymentIndex := -1
+	for i, payment := range invoice.Payments {
+		if paymentMatchesReversalRequest(payment, req) {
+			paymentIndex = i
+			break
+		}
+	}
+	if paymentIndex < 0 {
+		return Invoice{}, "", appErr(ErrNotFound, "invoice payment not found")
+	}
+	payment := invoice.Payments[paymentIndex]
+	if payment.Reversed {
+		return invoice, st.Root, nil
+	}
+	if payment.JournalEntryID == "" {
+		return Invoice{}, "", appErr(ErrValidation, "invoice payment %s has no journal entry to reverse", payment.ID)
+	}
+	original, ok := st.JournalEntries[payment.JournalEntryID]
+	if !ok {
+		return Invoice{}, "", appErr(ErrValidation, "payment journal entry %s not found", payment.JournalEntryID)
+	}
+	entry, root, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
+		Date:               req.Date,
+		Memo:               "Invoice payment reversed " + invoice.InvoiceNumber,
+		Workflow:           "invoice.reverse_payment",
+		PostingSemantics:   "invoice_payment_reversed",
+		SourceDocumentType: "invoice",
+		SourceDocumentID:   invoice.ID,
+		Source:             "invoice",
+		SourceKey:          invoice.ID + ":payment_reversal:" + payment.ID,
+		Postings:           reversePostings(original.Postings),
+		Metadata: map[string]string{
+			"payment_id":                payment.ID,
+			"original_journal_entry_id": payment.JournalEntryID,
+			"reason":                    req.Reason,
+		},
+	})
+	if err != nil {
+		return Invoice{}, "", err
+	}
+	payment.Reversed = true
+	payment.ReversalDate = req.Date
+	payment.ReversalReason = req.Reason
+	payment.ReversalJournalEntryID = entry.ID
+	invoice.Payments[paymentIndex] = payment
+	invoice.PaymentJournalEntryIDs = append(invoice.PaymentJournalEntryIDs, entry.ID)
+	invoice.Status = invoiceStatusFromPayments(invoice)
+	invoice.UpdatedAt = s.now().UTC()
+	invoice.UpdatedBy = ctx.Actor
+	hash, err := s.appendEvent(ctx, "invoice", invoice.ID, "invoice payment reverse", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), true)
 	if err != nil {
 		return Invoice{}, "", err
 	}
@@ -520,9 +617,39 @@ func invoiceRevenuePostings(invoice Invoice) []Posting {
 func invoicePaidAmount(invoice Invoice) int64 {
 	var total int64
 	for _, payment := range invoice.Payments {
+		if payment.Reversed {
+			continue
+		}
 		total += payment.AmountCents
 	}
 	return total
+}
+
+func invoiceStatusFromPayments(invoice Invoice) SourceDocumentStatus {
+	if invoicePaidAmount(invoice) == invoice.TotalCents {
+		return SourceDocumentPaid
+	}
+	return SourceDocumentOpen
+}
+
+func paymentMatchesReversalRequest(payment InvoicePayment, req InvoicePaymentReversalRequest) bool {
+	if req.PaymentID != "" && req.JournalEntryID != "" {
+		return payment.ID == req.PaymentID && payment.JournalEntryID == req.JournalEntryID
+	}
+	return (req.PaymentID != "" && payment.ID == req.PaymentID) || (req.JournalEntryID != "" && payment.JournalEntryID == req.JournalEntryID)
+}
+
+func reversePostings(postings []Posting) []Posting {
+	reversed := make([]Posting, 0, len(postings))
+	for _, posting := range postings {
+		reversed = append(reversed, Posting{
+			AccountID: posting.AccountID,
+			Debit:     posting.Credit,
+			Credit:    posting.Debit,
+			Memo:      "Reverse " + posting.Memo,
+		})
+	}
+	return reversed
 }
 
 func accountIDByRole(st State, role AccountRole) (string, error) {
