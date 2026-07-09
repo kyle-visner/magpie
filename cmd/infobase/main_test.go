@@ -642,6 +642,123 @@ func TestCLIImportsNormalizedExternalInvoice(t *testing.T) {
 	}
 }
 
+func TestCLIPayoutImportCreatesWorkflowJournals(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--number", "1020",
+		"--name", "Processor Clearing",
+		"--type", "asset",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	clearingID := extractNestedString(t, out.Bytes(), "account", "id")
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--number", "1010",
+		"--name", "Operating Bank",
+		"--type", "asset",
+		"--role", "operating_cash",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	bankID := extractNestedString(t, out.Bytes(), "account", "id")
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"ledger", "account", "create",
+		"--number", "6100",
+		"--name", "Merchant Fees",
+		"--type", "expense",
+		"--role", "merchant_fees_expense",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	feeID := extractNestedString(t, out.Bytes(), "account", "id")
+
+	payoutPath := filepath.Join(dir, "payout.json")
+	payoutJSON := `{
+		"date": "2026-06-18",
+		"description": "Processor batch 2026-06-18",
+		"source_account_id": "` + clearingID + `",
+		"destination_account_id": "` + bankID + `",
+		"net_amount_cents": 232518,
+		"fee_amount_cents": 1000,
+		"fee_expense_account_id": "` + feeID + `",
+		"external_refs": [{
+			"source_system": "payment_processor",
+			"external_id": "po_cli_1001",
+			"external_type": "payout",
+			"metadata": {
+				"destination_account_id": "external-bank-1"
+			}
+		}]
+	}`
+	if err := os.WriteFile(payoutPath, []byte(payoutJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "payout", "import-json", "--file", payoutPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	payout := decoded["payout"].(map[string]any)
+	payoutID := payout["id"].(string)
+	journalIDs := payout["journal_entry_ids"].([]any)
+	if len(journalIDs) != 2 {
+		t.Fatalf("expected receive and fee journal ids, got %#v", payout)
+	}
+
+	out.Reset()
+	if err := run([]string{"--store", dir, "payout", "import-json", "--file", payoutPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "payout", "get", "--payout-id", payoutID}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var gotPayout map[string]any
+	if err := json.Unmarshal(out.Bytes(), &gotPayout); err != nil {
+		t.Fatal(err)
+	}
+	if gotPayout["id"] != payoutID || gotPayout["net_amount_cents"] != float64(232518) {
+		t.Fatalf("unexpected payout get response: %#v", gotPayout)
+	}
+
+	out.Reset()
+	if err := run([]string{"--store", dir, "ledger", "journal", "list"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var journals map[string]map[string]any
+	if err := json.Unmarshal(out.Bytes(), &journals); err != nil {
+		t.Fatal(err)
+	}
+	if len(journals) != 2 {
+		t.Fatalf("expected receive and fee workflow journals after idempotent import retry, got %#v", journals)
+	}
+	workflows := map[string]bool{}
+	for _, journal := range journals {
+		if journal["origin"] != "workflow" || journal["source_document_type"] != "payout" || journal["source_document_id"] != payoutID {
+			t.Fatalf("unexpected payout workflow journal: %#v", journal)
+		}
+		workflows[journal["workflow"].(string)] = true
+	}
+	if !workflows["payout.receive"] || !workflows["payout.fee"] {
+		t.Fatalf("expected receive and fee workflows, got %#v", workflows)
+	}
+}
+
 func extractNestedString(t *testing.T, raw []byte, objectKey, fieldKey string) string {
 	t.Helper()
 	var decoded map[string]any

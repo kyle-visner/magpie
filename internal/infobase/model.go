@@ -181,6 +181,23 @@ type Invoice struct {
 	UpdatedBy              string               `json:"updated_by"`
 }
 
+type Payout struct {
+	ID                   string              `json:"id"`
+	Date                 string              `json:"date"`
+	Description          string              `json:"description,omitempty"`
+	SourceAccountID      string              `json:"source_account_id"`
+	DestinationAccountID string              `json:"destination_account_id"`
+	NetAmountCents       int64               `json:"net_amount_cents"`
+	FeeAmountCents       int64               `json:"fee_amount_cents,omitempty"`
+	FeeExpenseAccountID  string              `json:"fee_expense_account_id,omitempty"`
+	ExternalRefs         []ExternalSourceRef `json:"external_refs,omitempty"`
+	JournalEntryIDs      []string            `json:"journal_entry_ids,omitempty"`
+	CreatedAt            time.Time           `json:"created_at"`
+	UpdatedAt            time.Time           `json:"updated_at"`
+	CreatedBy            string              `json:"created_by"`
+	UpdatedBy            string              `json:"updated_by"`
+}
+
 type Account struct {
 	ID           string              `json:"id"`
 	Number       string              `json:"number,omitempty"`
@@ -249,6 +266,7 @@ type State struct {
 	JournalEntries map[string]JournalEntry `json:"journal_entries"`
 	Customers      map[string]Customer     `json:"customers"`
 	Invoices       map[string]Invoice      `json:"invoices"`
+	Payouts        map[string]Payout       `json:"payouts"`
 	Notes          map[string]Note         `json:"notes"`
 	SourceKeys     map[string]string       `json:"source_keys"`
 	Root           string                  `json:"root,omitempty"`
@@ -263,6 +281,7 @@ func emptyState() State {
 		JournalEntries: map[string]JournalEntry{},
 		Customers:      map[string]Customer{},
 		Invoices:       map[string]Invoice{},
+		Payouts:        map[string]Payout{},
 		Notes:          map[string]Note{},
 		SourceKeys:     map[string]string{},
 	}

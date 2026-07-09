@@ -81,6 +81,8 @@ func run(args []string, out io.Writer) error {
 		return a.customer(rest[1:], out)
 	case "invoice":
 		return a.invoice(rest[1:], out)
+	case "payout":
+		return a.payout(rest[1:], out)
 	case "ledger":
 		return a.ledger(rest[1:], out)
 	case "note":
@@ -89,6 +91,51 @@ func run(args []string, out io.Writer) error {
 		return a.snapshot(rest[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q", rest[0])
+	}
+}
+
+func (a app) payout(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("payout command required")
+	}
+	switch args[0] {
+	case "import-json":
+		fs := newFlagSet("payout import-json")
+		file := fs.String("file", "", "JSON file with normalized external payout import; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var payout infobase.Payout
+		if err := readJSONFile(*file, &payout); err != nil {
+			return err
+		}
+		imported, root, err := a.store.ImportPayout(a.ctx, payout)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "payout": imported})
+	case "get":
+		fs := newFlagSet("payout get")
+		payoutID := fs.String("payout-id", "", "InfoBase payout id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		payout, err := a.store.GetPayout(a.ctx, *payoutID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, payout)
+	case "list":
+		st, err := a.store.LoadState()
+		if err != nil {
+			return err
+		}
+		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionLedgerRead); err != nil {
+			return err
+		}
+		return writeJSON(out, st.Payouts)
+	default:
+		return fmt.Errorf("unknown payout command %q", args[0])
 	}
 }
 
@@ -627,6 +674,9 @@ Commands:
   invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
   invoice get --invoice-id ID
   invoice list
+  payout import-json --file payout.json
+  payout get --payout-id ID
+  payout list
   rbac defaults repair
   rbac permissions
   rbac role set --name NAME --permissions p1,p2
