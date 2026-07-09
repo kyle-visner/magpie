@@ -349,6 +349,24 @@ func (s *Store) applyNode(st *State, node Node) error {
 			return appErr(ErrValidation, "invoice.update references unknown invoice %s", ev.Invoice.ID)
 		}
 		st.Invoices[ev.Invoice.ID] = ev.Invoice
+	case "payout.create":
+		var ev payoutCreatePayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return err
+		}
+		if _, ok := st.Payouts[ev.Payout.ID]; ok {
+			return appErr(ErrValidation, "payout.create references existing payout %s", ev.Payout.ID)
+		}
+		st.Payouts[ev.Payout.ID] = ev.Payout
+	case "payout.update":
+		var ev payoutUpdatePayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return err
+		}
+		if _, ok := st.Payouts[ev.Payout.ID]; !ok {
+			return appErr(ErrValidation, "payout.update references unknown payout %s", ev.Payout.ID)
+		}
+		st.Payouts[ev.Payout.ID] = ev.Payout
 	case "settings.update":
 		var ev settingsUpdatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {

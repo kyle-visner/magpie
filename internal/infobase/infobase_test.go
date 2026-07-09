@@ -953,6 +953,164 @@ func TestExternalInvoiceImportRequiresDefaultRevenueWhenLineOmitsAccount(t *test
 	}
 }
 
+func TestPayoutImportCreatesReceiveAndFeeWorkflowJournals(t *testing.T) {
+	s, owner := newTestStore(t)
+	if _, err := s.UpsertRole(owner, Role{
+		Name: "Bookkeeping Agent",
+		Permissions: []Permission{
+			PermissionLedgerRead,
+			PermissionLedgerWrite,
+			PermissionAuditRead,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertUser(owner, User{ID: "bookkeeper", Role: "Bookkeeping Agent"}); err != nil {
+		t.Fatal(err)
+	}
+	clearing := mustAccount(t, s, owner, "Processor Clearing", AccountAsset)
+	bank := mustRoleAccount(t, s, owner, "1010", "Operating Bank", AccountAsset, AccountRoleOperatingCash)
+	fee := mustRoleAccount(t, s, owner, "6100", "Merchant Fees", AccountExpense, AccountRoleMerchantFeesExpense)
+	bookkeeper := Context{Actor: "bookkeeper"}
+
+	first, root, err := s.ImportPayout(bookkeeper, Payout{
+		Date:                 "2026-06-18",
+		Description:          "Batch 2026-06-18",
+		SourceAccountID:      clearing.ID,
+		DestinationAccountID: bank.ID,
+		NetAmountCents:       232518,
+		FeeAmountCents:       1000,
+		FeeExpenseAccountID:  fee.ID,
+		ExternalRefs: []ExternalSourceRef{{
+			SourceSystem: "payment_processor",
+			ExternalID:   "po_1001",
+			ExternalType: "payout",
+			Metadata: map[string]string{
+				"destination_account_id": "external-bank-1",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.JournalEntryIDs) != 2 {
+		t.Fatalf("expected receive and fee journals, got %#v", first)
+	}
+	second, secondRoot, err := s.ImportPayout(bookkeeper, Payout{
+		Date:                 "2026-06-18",
+		Description:          "Batch 2026-06-18",
+		SourceAccountID:      clearing.ID,
+		DestinationAccountID: bank.ID,
+		NetAmountCents:       232518,
+		FeeAmountCents:       1000,
+		FeeExpenseAccountID:  fee.ID,
+		ExternalRefs: []ExternalSourceRef{{
+			SourceSystem: "payment_processor",
+			ExternalID:   "po_1001",
+			ExternalType: "payout",
+			Metadata: map[string]string{
+				"destination_account_id": "external-bank-1",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID || secondRoot != root {
+		t.Fatalf("expected idempotent payout import, first=%#v second=%#v root=%s secondRoot=%s", first, second, root, secondRoot)
+	}
+
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Payouts) != 1 || len(st.JournalEntries) != 2 {
+		t.Fatalf("expected one payout and two journals, got payouts=%d journals=%d", len(st.Payouts), len(st.JournalEntries))
+	}
+	receive := st.JournalEntries[first.JournalEntryIDs[0]]
+	if receive.Origin != JournalOriginWorkflow ||
+		receive.Workflow != "payout.receive" ||
+		receive.PostingSemantics != "payout_received" ||
+		receive.SourceDocumentType != "payout" ||
+		receive.SourceDocumentID != first.ID ||
+		receive.AccountingBasis != AccountingBasisCash {
+		t.Fatalf("unexpected payout receive journal metadata: %#v", receive)
+	}
+	assertPosting(t, receive, bank.ID, 232518, 0)
+	assertPosting(t, receive, clearing.ID, 0, 232518)
+
+	feeEntry := st.JournalEntries[first.JournalEntryIDs[1]]
+	if feeEntry.Origin != JournalOriginWorkflow ||
+		feeEntry.Workflow != "payout.fee" ||
+		feeEntry.PostingSemantics != "payout_fee" ||
+		feeEntry.SourceDocumentID != first.ID {
+		t.Fatalf("unexpected payout fee journal metadata: %#v", feeEntry)
+	}
+	assertPosting(t, feeEntry, fee.ID, 1000, 0)
+	assertPosting(t, feeEntry, clearing.ID, 0, 1000)
+
+	_, _, err = s.CreateJournalEntry(bookkeeper, JournalEntry{
+		Date:         "2026-06-18",
+		Memo:         "Manual payout bypass",
+		ManualReason: "should not be allowed",
+		Postings: []Posting{
+			{AccountID: bank.ID, Debit: 232518},
+			{AccountID: clearing.ID, Credit: 232518},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected manual journal to remain denied")
+	}
+}
+
+func TestPayoutImportRequiresDestinationAndFeeRoles(t *testing.T) {
+	s, ctx := newTestStore(t)
+	clearing := mustAccount(t, s, ctx, "Processor Clearing", AccountAsset)
+	bank := mustAccount(t, s, ctx, "Unclassified Bank", AccountAsset)
+	fee := mustAccount(t, s, ctx, "Unclassified Fees", AccountExpense)
+
+	_, _, err := s.ImportPayout(ctx, Payout{
+		Date:                 "2026-06-18",
+		SourceAccountID:      clearing.ID,
+		DestinationAccountID: bank.ID,
+		NetAmountCents:       1000,
+		FeeAmountCents:       100,
+		FeeExpenseAccountID:  fee.ID,
+		ExternalRefs: []ExternalSourceRef{{
+			SourceSystem: "processor",
+			ExternalID:   "payout-1",
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected payout destination role validation")
+	}
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrValidation || !strings.Contains(app.Message, "destination account") {
+		t.Fatalf("expected destination role validation error, got %#v", err)
+	}
+	if _, _, err := s.SetAccountRole(ctx, bank.ID, AccountRoleBankAccount); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = s.ImportPayout(ctx, Payout{
+		Date:                 "2026-06-18",
+		SourceAccountID:      clearing.ID,
+		DestinationAccountID: bank.ID,
+		NetAmountCents:       1000,
+		FeeAmountCents:       100,
+		FeeExpenseAccountID:  fee.ID,
+		ExternalRefs: []ExternalSourceRef{{
+			SourceSystem: "processor",
+			ExternalID:   "payout-1",
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected payout fee role validation")
+	}
+	if !errors.As(err, &app) || app.Code != ErrValidation || !strings.Contains(app.Message, "fee expense account") {
+		t.Fatalf("expected fee role validation error, got %#v", err)
+	}
+}
+
 func TestExternalInvoiceImportInfersTaxFromLineItems(t *testing.T) {
 	s, ctx := newTestStore(t)
 	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)

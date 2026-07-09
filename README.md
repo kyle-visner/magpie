@@ -14,7 +14,7 @@ It is built around one rule: agents and humans use the same CLI, and the CLI enf
 - Book-level accounting basis support for cash, modified cash, and accrual accounting.
 - Chart account roles for workflow-safe account selection.
 - Privileged manual journal adjustments with required audit reasons.
-- First-class customer and invoice workflows that generate basis-aware journals.
+- First-class customer, invoice, and payout workflows that generate basis-aware journals.
 - Structured external source references on ledger accounts.
 - Markdown note create, update, list, and get operations.
 - Source-tagged journal entries for agent-mapped exports from QuickBooks or other systems.
@@ -564,11 +564,65 @@ List source documents:
 ./infobase --store .infobase --actor bookkeeping-agent invoice list
 ```
 
+## Payout And External Transfer Workflow
+
+Payouts are first-class source documents for provider deposits and other external transfers into a bank account. InfoBase does not parse provider exports directly. The AI bookkeeping agent interprets source-specific data, maps it to existing InfoBase accounts, and submits normalized JSON with external references.
+
+Minimum account roles:
+
+- `operating_cash` or `bank_account` for the destination bank account.
+- `merchant_fees_expense` when the payout includes processing fees.
+
+The source account is an asset account representing the clearing, processor, or external-transfer balance being reduced. It does not need a provider-specific role.
+
+Import a normalized payout:
+
+```json
+{
+  "date": "2026-06-18",
+  "description": "Processor batch 2026-06-18",
+  "source_account_id": "acct:PROCESSOR_CLEARING_ID",
+  "destination_account_id": "acct:OPERATING_BANK_ID",
+  "net_amount_cents": 232518,
+  "fee_amount_cents": 1000,
+  "fee_expense_account_id": "acct:MERCHANT_FEES_ID",
+  "external_refs": [
+    {
+      "source_system": "payment_processor",
+      "external_id": "payout-1001",
+      "external_type": "payout",
+      "metadata": {
+        "destination_account_id": "external-bank-1"
+      }
+    }
+  ]
+}
+```
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent payout import-json \
+  --file ./payout.json
+```
+
+`payout import-json` stores the payout source document idempotently by `external_refs`, then creates workflow journals:
+
+- `payout.receive`: debit destination bank account, credit source/clearing account for `net_amount_cents`.
+- `payout.fee`: when `fee_amount_cents` is present, debit merchant fee expense, credit source/clearing account.
+
+Workflow journals are stamped with the active accounting basis, source document metadata, and source keys. Agents can retry the same payout import safely without creating duplicate payout documents or journals. The command requires `ledger:write`, not `journal:adjust`.
+
+List payout source documents:
+
+```sh
+./infobase --store .infobase --actor bookkeeping-agent payout get --payout-id payout:...
+./infobase --store .infobase --actor bookkeeping-agent payout list
+```
+
 ## Manual Journal Adjustments
 
 Generic journal creation is restricted. It requires both `ledger:write` and `journal:adjust`, and it must include a `manual_reason`. Default `Owner` and `Admin` roles have `journal:adjust`; ordinary bookkeeping agents should not.
 
-Manual journals are for controlled adjustments, opening/import work, and emergency correction workflows until first-class domain workflows exist. Future invoice, bill, bank-match, tax, loan, transfer, and fixed-asset commands should generate workflow-originated journals instead of asking agents to hand-author postings.
+Manual journals are for controlled adjustments, opening/import work, and emergency correction workflows until first-class domain workflows exist. Future bill, bank-match, tax, loan, transfer, and fixed-asset commands should generate workflow-originated journals instead of asking agents to hand-author postings.
 
 Create a balanced manual journal JSON file:
 
