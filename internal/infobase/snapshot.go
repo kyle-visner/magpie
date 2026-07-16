@@ -1,10 +1,6 @@
 package infobase
 
-import (
-	"os"
-	"path/filepath"
-	"strings"
-)
+import "strings"
 
 type Snapshot struct {
 	Name string `json:"name"`
@@ -26,9 +22,8 @@ func (s *Store) CreateSnapshot(ctx Context, name string) (Snapshot, error) {
 	if st.Root == "" {
 		return Snapshot{}, appErr(ErrValidation, "cannot snapshot an empty store")
 	}
-	path := filepath.Join(s.dir, "refs", "named", name)
-	if err := os.WriteFile(path, []byte(st.Root+"\n"), 0o600); err != nil {
-		return Snapshot{}, err
+	if err := s.db.WriteNamedRef(name, st.Root); err != nil {
+		return Snapshot{}, storageError(err)
 	}
 	return Snapshot{Name: name, Root: st.Root}, nil
 }

@@ -4,10 +4,16 @@ InfoBase is a Phase 1 Go implementation of the PRD in `InfoBase_Requirements.md`
 
 It is built around one rule: agents and humans use the same CLI, and the CLI enforces RBAC, ledger invariants, encryption, immutable history, and auditability before data is written.
 
+## Project Layout
+
+- The repository root is the accounting CLI project.
+- `jaybase/` is the extracted AI-native storage project. It is a separate Go module named `github.com/kyle-visner/jaybase` and carries AGPL-3.0-or-later license metadata.
+- The CLI consumes `jaybase/` through a local `replace` directive in `go.mod`; nothing has been pushed to GitHub yet.
+
 ## Current Capabilities
 
 - Canonical local CLI in `cmd/infobase`.
-- Custom immutable Merkle-DAG-style storage with SHA-256-addressed JSON nodes.
+- Extracted custom immutable Merkle-DAG-style storage with SHA-256-addressed JSON nodes in `jaybase/`.
 - AES-256-GCM encryption for stored node payloads.
 - Unified RBAC for ledger, notes, snapshots, and audit reads.
 - Double-entry ledger validation before persistence.
@@ -28,6 +34,7 @@ From the repository root:
 
 ```sh
 go test ./...
+(cd jaybase && go test ./...)
 go build -o ./infobase ./cmd/infobase
 ```
 
@@ -35,6 +42,7 @@ If your environment blocks the default Go build cache, use a writable cache:
 
 ```sh
 GOCACHE=/private/tmp/infobase-gocache go test ./...
+(cd jaybase && GOCACHE=/private/tmp/infobase-gocache go test ./...)
 GOCACHE=/private/tmp/infobase-gocache go build -o ./infobase ./cmd/infobase
 ```
 
