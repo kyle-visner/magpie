@@ -26,7 +26,7 @@ It is built around one rule: agents and humans use the same CLI, and the CLI enf
 - Source-tagged journal entries for agent-mapped exports from QuickBooks or other systems.
 - Named snapshots for recoverable roots.
 - JSON command output by default for agent consumption.
-- Automated tests for business invariants and CLI behavior.
+- Automated tests for business invariants, CLI behavior, and BDD-style core scenarios.
 
 ## Build And Verify
 
