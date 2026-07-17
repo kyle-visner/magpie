@@ -8,12 +8,12 @@ import (
 	"os"
 	"strings"
 
-	"infobase/internal/infobase"
+	"magpie/internal/magpie"
 )
 
 type app struct {
-	store *infobase.Store
-	ctx   infobase.Context
+	store *magpie.Store
+	ctx   magpie.Context
 }
 
 func main() {
@@ -24,9 +24,9 @@ func main() {
 }
 
 func run(args []string, out io.Writer) error {
-	global := flag.NewFlagSet("infobase", flag.ContinueOnError)
+	global := flag.NewFlagSet("magpie", flag.ContinueOnError)
 	global.SetOutput(io.Discard)
-	storeDir := global.String("store", ".infobase", "store directory")
+	storeDir := global.String("store", ".magpie", "store directory")
 	actor := global.String("actor", "owner", "authenticated actor id")
 	role := global.String("role", "", "role to assume; defaults to the actor's configured role")
 	if err := global.Parse(args); err != nil {
@@ -39,11 +39,11 @@ func run(args []string, out io.Writer) error {
 	if rest[0] == "help" || rest[0] == "--help" || rest[0] == "-h" {
 		return usage(out)
 	}
-	store, err := infobase.OpenStore(*storeDir)
+	store, err := magpie.OpenStore(*storeDir)
 	if err != nil {
 		return err
 	}
-	a := app{store: store, ctx: infobase.Context{Actor: *actor, Role: *role}}
+	a := app{store: store, ctx: magpie.Context{Actor: *actor, Role: *role}}
 	switch rest[0] {
 	case "init":
 		root, err := store.WriteInitialRoot(a.ctx)
@@ -56,7 +56,7 @@ func run(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionAuditRead); err != nil {
+		if err := magpie.EnsurePermission(st, a.ctx, magpie.PermissionAuditRead); err != nil {
 			return err
 		}
 		return writeJSON(out, st)
@@ -65,7 +65,7 @@ func run(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionAuditRead); err != nil {
+		if err := magpie.EnsurePermission(st, a.ctx, magpie.PermissionAuditRead); err != nil {
 			return err
 		}
 		nodes, err := store.AuditLog()
@@ -105,7 +105,7 @@ func (a app) payout(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		var payout infobase.Payout
+		var payout magpie.Payout
 		if err := readJSONFile(*file, &payout); err != nil {
 			return err
 		}
@@ -116,7 +116,7 @@ func (a app) payout(args []string, out io.Writer) error {
 		return writeJSON(out, map[string]any{"root": root, "payout": imported})
 	case "get":
 		fs := newFlagSet("payout get")
-		payoutID := fs.String("payout-id", "", "InfoBase payout id")
+		payoutID := fs.String("payout-id", "", "Magpie payout id")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -130,7 +130,7 @@ func (a app) payout(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionLedgerRead); err != nil {
+		if err := magpie.EnsurePermission(st, a.ctx, magpie.PermissionLedgerRead); err != nil {
 			return err
 		}
 		return writeJSON(out, st.Payouts)
@@ -150,7 +150,7 @@ func (a app) customer(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		var customer infobase.Customer
+		var customer magpie.Customer
 		if err := readJSONFile(*file, &customer); err != nil {
 			return err
 		}
@@ -161,7 +161,7 @@ func (a app) customer(args []string, out io.Writer) error {
 		return writeJSON(out, map[string]any{"root": root, "customer": created})
 	case "get":
 		fs := newFlagSet("customer get")
-		customerID := fs.String("customer-id", "", "InfoBase customer id")
+		customerID := fs.String("customer-id", "", "Magpie customer id")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -175,7 +175,7 @@ func (a app) customer(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionLedgerRead); err != nil {
+		if err := magpie.EnsurePermission(st, a.ctx, magpie.PermissionLedgerRead); err != nil {
 			return err
 		}
 		return writeJSON(out, st.Customers)
@@ -195,7 +195,7 @@ func (a app) invoice(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		var invoice infobase.Invoice
+		var invoice magpie.Invoice
 		if err := readJSONFile(*file, &invoice); err != nil {
 			return err
 		}
@@ -210,7 +210,7 @@ func (a app) invoice(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		var req infobase.ExternalInvoiceImportRequest
+		var req magpie.ExternalInvoiceImportRequest
 		if err := readJSONFile(*file, &req); err != nil {
 			return err
 		}
@@ -221,7 +221,7 @@ func (a app) invoice(args []string, out io.Writer) error {
 		return writeJSON(out, map[string]any{"root": root, "import": result})
 	case "post":
 		fs := newFlagSet("invoice post")
-		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		invoiceID := fs.String("invoice-id", "", "Magpie invoice id")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -232,7 +232,7 @@ func (a app) invoice(args []string, out io.Writer) error {
 		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
 	case "mark-paid":
 		fs := newFlagSet("invoice mark-paid")
-		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		invoiceID := fs.String("invoice-id", "", "Magpie invoice id")
 		cashAccountID := fs.String("cash-account-id", "", "cash or bank account id")
 		date := fs.String("paid-date", "", "payment date YYYY-MM-DD")
 		amount := fs.Int64("amount-cents", 0, "payment amount in cents")
@@ -242,7 +242,7 @@ func (a app) invoice(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		invoice, root, err := a.store.MarkInvoicePaid(a.ctx, *invoiceID, infobase.InvoicePaymentRequest{
+		invoice, root, err := a.store.MarkInvoicePaid(a.ctx, *invoiceID, magpie.InvoicePaymentRequest{
 			Date:            *date,
 			AmountCents:     *amount,
 			CashAccountID:   *cashAccountID,
@@ -256,15 +256,15 @@ func (a app) invoice(args []string, out io.Writer) error {
 		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
 	case "reverse-payment":
 		fs := newFlagSet("invoice reverse-payment")
-		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
-		paymentID := fs.String("payment-id", "", "InfoBase payment id")
+		invoiceID := fs.String("invoice-id", "", "Magpie invoice id")
+		paymentID := fs.String("payment-id", "", "Magpie payment id")
 		journalEntryID := fs.String("journal-entry-id", "", "payment journal entry id")
 		date := fs.String("reversal-date", "", "reversal date YYYY-MM-DD")
 		reason := fs.String("reason", "", "reason for reversal")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		invoice, root, err := a.store.ReverseInvoicePayment(a.ctx, *invoiceID, infobase.InvoicePaymentReversalRequest{
+		invoice, root, err := a.store.ReverseInvoicePayment(a.ctx, *invoiceID, magpie.InvoicePaymentReversalRequest{
 			PaymentID:      *paymentID,
 			JournalEntryID: *journalEntryID,
 			Date:           *date,
@@ -276,7 +276,7 @@ func (a app) invoice(args []string, out io.Writer) error {
 		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
 	case "get":
 		fs := newFlagSet("invoice get")
-		invoiceID := fs.String("invoice-id", "", "InfoBase invoice id")
+		invoiceID := fs.String("invoice-id", "", "Magpie invoice id")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -290,7 +290,7 @@ func (a app) invoice(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionLedgerRead); err != nil {
+		if err := magpie.EnsurePermission(st, a.ctx, magpie.PermissionLedgerRead); err != nil {
 			return err
 		}
 		return writeJSON(out, st.Invoices)
@@ -328,7 +328,7 @@ func (a app) bookSettings(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		settings, root, err := a.store.SetAccountingBasis(a.ctx, infobase.AccountingBasis(*accountingBasis))
+		settings, root, err := a.store.SetAccountingBasis(a.ctx, magpie.AccountingBasis(*accountingBasis))
 		if err != nil {
 			return err
 		}
@@ -353,7 +353,7 @@ func (a app) rbac(args []string, out io.Writer) error {
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
-		hash, err := a.store.UpsertUser(a.ctx, infobase.User{ID: *id, Role: *role})
+		hash, err := a.store.UpsertUser(a.ctx, magpie.User{ID: *id, Role: *role})
 		if err != nil {
 			return err
 		}
@@ -368,7 +368,7 @@ func (a app) rbac(args []string, out io.Writer) error {
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
 		}
-		role := infobase.Role{Name: *name, Permissions: parsePermissions(*perms)}
+		role := magpie.Role{Name: *name, Permissions: parsePermissions(*perms)}
 		hash, err := a.store.UpsertRole(a.ctx, role)
 		if err != nil {
 			return err
@@ -384,7 +384,7 @@ func (a app) rbac(args []string, out io.Writer) error {
 		}
 		return writeJSON(out, map[string]any{"root": root, "repair": result})
 	case "permissions":
-		return writeJSON(out, infobase.PermissionNames())
+		return writeJSON(out, magpie.PermissionNames())
 	default:
 		return fmt.Errorf("unknown rbac command %q", args[0])
 	}
@@ -426,7 +426,7 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		externalRefs := []infobase.ExternalSourceRef{{
+		externalRefs := []magpie.ExternalSourceRef{{
 			SourceSystem: *externalSource,
 			ExternalID:   *externalID,
 			ExternalType: *externalType,
@@ -434,11 +434,11 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 			URL:          *externalURL,
 			Metadata:     externalMetadata,
 		}}
-		acct, root, err := a.store.CreateAccountWithDetails(a.ctx, infobase.Account{
+		acct, root, err := a.store.CreateAccountWithDetails(a.ctx, magpie.Account{
 			Number:       *number,
 			Name:         *name,
-			Type:         infobase.AccountType(*typ),
-			Role:         infobase.AccountRole(*role),
+			Type:         magpie.AccountType(*typ),
+			Role:         magpie.AccountRole(*role),
 			Sensitivity:  *sensitivity,
 			ExternalRefs: externalRefs,
 		})
@@ -452,7 +452,7 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		var account infobase.Account
+		var account magpie.Account
 		if err := readJSONFile(*file, &account); err != nil {
 			return err
 		}
@@ -472,7 +472,7 @@ func (a app) ledgerAccount(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionLedgerRead); err != nil {
+		if err := magpie.EnsurePermission(st, a.ctx, magpie.PermissionLedgerRead); err != nil {
 			return err
 		}
 		return writeJSON(out, st.Accounts)
@@ -487,15 +487,15 @@ func (a app) ledgerAccountRole(args []string, out io.Writer) error {
 	}
 	switch args[0] {
 	case "list":
-		return writeJSON(out, infobase.AccountRoleNames())
+		return writeJSON(out, magpie.AccountRoleNames())
 	case "set":
 		fs := newFlagSet("ledger account role set")
-		accountID := fs.String("account-id", "", "InfoBase account id")
+		accountID := fs.String("account-id", "", "Magpie account id")
 		role := fs.String("role", "", "account role")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		account, root, err := a.store.SetAccountRole(a.ctx, *accountID, infobase.AccountRole(*role))
+		account, root, err := a.store.SetAccountRole(a.ctx, *accountID, magpie.AccountRole(*role))
 		if err != nil {
 			return err
 		}
@@ -510,7 +510,7 @@ func (a app) ledgerAccountNumber(args []string, out io.Writer) error {
 		return fmt.Errorf("usage: ledger account number set --account-id ACCOUNT_ID --number NUMBER")
 	}
 	fs := newFlagSet("ledger account number set")
-	accountID := fs.String("account-id", "", "InfoBase account id")
+	accountID := fs.String("account-id", "", "Magpie account id")
 	number := fs.String("number", "", "chart of accounts number")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -527,7 +527,7 @@ func (a app) ledgerAccountExternalRef(args []string, out io.Writer) error {
 		return fmt.Errorf("usage: ledger account external-ref set --account-id ACCOUNT_ID --external-source SOURCE --external-id ID")
 	}
 	fs := newFlagSet("ledger account external-ref set")
-	accountID := fs.String("account-id", "", "InfoBase account id")
+	accountID := fs.String("account-id", "", "Magpie account id")
 	externalSource := fs.String("external-source", "", "external source system")
 	externalID := fs.String("external-id", "", "external source id")
 	externalType := fs.String("external-type", "", "external source type, such as bank_account or chart_account")
@@ -539,14 +539,14 @@ func (a app) ledgerAccountExternalRef(args []string, out io.Writer) error {
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	account, root, err := a.store.SetAccountExternalRefWithRole(a.ctx, *accountID, infobase.ExternalSourceRef{
+	account, root, err := a.store.SetAccountExternalRefWithRole(a.ctx, *accountID, magpie.ExternalSourceRef{
 		SourceSystem: *externalSource,
 		ExternalID:   *externalID,
 		ExternalType: *externalType,
 		DisplayName:  *externalDisplayName,
 		URL:          *externalURL,
 		Metadata:     externalMetadata,
-	}, infobase.AccountRole(*role))
+	}, magpie.AccountRole(*role))
 	if err != nil {
 		return err
 	}
@@ -564,7 +564,7 @@ func (a app) ledgerJournal(args []string, out io.Writer) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		var entry infobase.JournalEntry
+		var entry magpie.JournalEntry
 		if err := readJSONFile(*file, &entry); err != nil {
 			return err
 		}
@@ -578,7 +578,7 @@ func (a app) ledgerJournal(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionLedgerRead); err != nil {
+		if err := magpie.EnsurePermission(st, a.ctx, magpie.PermissionLedgerRead); err != nil {
 			return err
 		}
 		return writeJSON(out, st.JournalEntries)
@@ -630,7 +630,7 @@ func (a app) note(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := infobase.EnsurePermission(st, a.ctx, infobase.PermissionNotesRead); err != nil {
+		if err := magpie.EnsurePermission(st, a.ctx, magpie.PermissionNotesRead); err != nil {
 			return err
 		}
 		return writeJSON(out, st.Notes)
@@ -656,7 +656,7 @@ func (a app) snapshot(args []string, out io.Writer) error {
 }
 
 func usage(out io.Writer) error {
-	_, err := fmt.Fprintln(out, `InfoBase CLI
+	_, err := fmt.Fprintln(out, `Magpie CLI
 
 Commands:
   init
@@ -717,21 +717,21 @@ func writeJSON(w io.Writer, v any) error {
 func writeError(err error) {
 	code := "error"
 	msg := err.Error()
-	if appErr, ok := err.(*infobase.AppError); ok {
+	if appErr, ok := err.(*magpie.AppError); ok {
 		code = string(appErr.Code)
 		msg = appErr.Message
 	}
 	_ = json.NewEncoder(os.Stderr).Encode(map[string]string{"code": code, "message": msg})
 }
 
-func parsePermissions(s string) []infobase.Permission {
+func parsePermissions(s string) []magpie.Permission {
 	if strings.TrimSpace(s) == "" {
 		return nil
 	}
 	parts := strings.Split(s, ",")
-	perms := make([]infobase.Permission, 0, len(parts))
+	perms := make([]magpie.Permission, 0, len(parts))
 	for _, p := range parts {
-		perms = append(perms, infobase.Permission(strings.TrimSpace(p)))
+		perms = append(perms, magpie.Permission(strings.TrimSpace(p)))
 	}
 	return perms
 }

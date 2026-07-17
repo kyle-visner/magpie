@@ -1,19 +1,19 @@
-# InfoBase
+# Magpie
 
-InfoBase is a Phase 1 Go implementation of the PRD in `InfoBase_Requirements.md`.
+Magpie is a Phase 1 Go implementation of the PRD in `Magpie_Requirements.md`.
 
 It is built around one rule: agents and humans use the same CLI, and the CLI enforces RBAC, ledger invariants, encryption, immutable history, and auditability before data is written.
 
 ## Project Layout
 
 - The repository root is the accounting CLI project.
-- `jaybase/` is the extracted AI-native storage project. It is a separate Go module named `github.com/kyle-visner/jaybase` and carries AGPL-3.0-or-later license metadata.
-- The CLI consumes `jaybase/` through a local `replace` directive in `go.mod`; nothing has been pushed to GitHub yet.
+- Jaybase is the extracted AI-native storage project published separately as the private module `github.com/kyle-visner/jaybase`.
+- Magpie depends on Jaybase as a Go module; configure private module access with `GOPRIVATE=github.com/kyle-visner/*` when building from a fresh environment.
 
 ## Current Capabilities
 
-- Canonical local CLI in `cmd/infobase`.
-- Extracted custom immutable Merkle-DAG-style storage with SHA-256-addressed JSON nodes in `jaybase/`.
+- Canonical local CLI in `cmd/magpie`.
+- Extracted custom immutable Merkle-DAG-style storage with SHA-256-addressed JSON nodes through Jaybase.
 - AES-256-GCM encryption for stored node payloads.
 - Unified RBAC for ledger, notes, snapshots, and audit reads.
 - Double-entry ledger validation before persistence.
@@ -34,27 +34,41 @@ From the repository root:
 
 ```sh
 go test ./...
-(cd jaybase && go test ./...)
-go build -o ./infobase ./cmd/infobase
+go build -o ./magpie ./cmd/magpie
 ```
 
 If your environment blocks the default Go build cache, use a writable cache:
 
 ```sh
-GOCACHE=/private/tmp/infobase-gocache go test ./...
-(cd jaybase && GOCACHE=/private/tmp/infobase-gocache go test ./...)
-GOCACHE=/private/tmp/infobase-gocache go build -o ./infobase ./cmd/infobase
+GOPRIVATE=github.com/kyle-visner/* GOCACHE=/private/tmp/magpie-gocache GOMODCACHE=/private/tmp/magpie-gomodcache go test ./...
+GOPRIVATE=github.com/kyle-visner/* GOCACHE=/private/tmp/magpie-gocache GOMODCACHE=/private/tmp/magpie-gomodcache go build -o ./magpie ./cmd/magpie
 ```
 
-The generated `./infobase` binary is ignored by Git.
+The generated `./magpie` binary is ignored by Git.
+
+## Performance Benchmarks
+
+Run the accounting benchmarks from this repository. Run Jaybase benchmarks from the separate Jaybase repository.
+
+```sh
+GOPRIVATE=github.com/kyle-visner/* GOCACHE=/private/tmp/magpie-gocache GOMODCACHE=/private/tmp/magpie-gomodcache go test -run '^$' -bench . -benchmem ./...
+```
+
+For baseline comparisons, capture multiple runs and compare them with `benchstat`:
+
+```sh
+mkdir -p .benchmarks
+GOPRIVATE=github.com/kyle-visner/* GOCACHE=/private/tmp/magpie-gocache GOMODCACHE=/private/tmp/magpie-gomodcache go test -run '^$' -bench . -benchmem -count 5 ./... > .benchmarks/magpie-main.txt
+benchstat .benchmarks/magpie-main.txt .benchmarks/magpie-feature.txt
+```
 
 ## Agent Integration Pattern
 
 Give your agent a fixed command template and tell it to parse stdout as JSON:
 
 ```sh
-/Users/kylevisner/dev/infobase/infobase \
-  --store /Users/kylevisner/dev/infobase/.infobase \
+./magpie \
+  --store .magpie \
   --actor AGENT_USER_ID \
   COMMAND...
 ```
@@ -62,8 +76,8 @@ Give your agent a fixed command template and tell it to parse stdout as JSON:
 For development without building first, use:
 
 ```sh
-go run ./cmd/infobase \
-  --store /Users/kylevisner/dev/infobase/.infobase \
+go run ./cmd/magpie \
+  --store .magpie \
   --actor AGENT_USER_ID \
   COMMAND...
 ```
@@ -72,7 +86,7 @@ Operational rules for agents:
 
 - Treat stdout as the only success channel.
 - Treat stderr as JSON error output.
-- Never edit `.infobase/` files directly.
+- Never edit `.magpie/` files directly.
 - Never invent raw storage mutations.
 - Read `book settings get` before posting financial activity.
 - Use the active `accounting_basis` for the whole book; do not choose cash, modified cash, or accrual per transaction.
@@ -93,7 +107,7 @@ Errors look like:
 Initialize a local store:
 
 ```sh
-./infobase --store .infobase init
+./magpie --store .magpie init
 ```
 
 The default initialized actor is `owner` with the `Owner` role.
@@ -101,13 +115,13 @@ The default initialized actor is `owner` with the `Owner` role.
 List supported permissions:
 
 ```sh
-./infobase --store .infobase --actor owner rbac permissions
+./magpie --store .magpie --actor owner rbac permissions
 ```
 
 Create an agent user with a constrained role:
 
 ```sh
-./infobase --store .infobase --actor owner rbac user set \
+./magpie --store .magpie --actor owner rbac user set \
   --id ops-agent \
   --role Operations
 ```
@@ -123,7 +137,7 @@ Built-in roles:
 Stores initialized before new built-in permissions were added can repair default roles without changing custom roles or users:
 
 ```sh
-./infobase --store .infobase --actor owner rbac defaults repair
+./magpie --store .magpie --actor owner rbac defaults repair
 ```
 
 The repair command requires `rbac:manage`, adds missing current default permissions to built-in roles, and preserves any existing extra permissions on those roles.
@@ -131,7 +145,7 @@ The repair command requires `rbac:manage`, adds missing current default permissi
 To define a custom role:
 
 ```sh
-./infobase --store .infobase --actor owner rbac role set \
+./magpie --store .magpie --actor owner rbac role set \
   --name "Notes Agent" \
   --permissions notes:read,notes:write
 ```
@@ -139,7 +153,7 @@ To define a custom role:
 Then assign it:
 
 ```sh
-./infobase --store .infobase --actor owner rbac user set \
+./magpie --store .magpie --actor owner rbac user set \
   --id notes-agent \
   --role "Notes Agent"
 ```
@@ -149,7 +163,7 @@ Then assign it:
 Create or update a note:
 
 ```sh
-./infobase --store .infobase --actor notes-agent note put \
+./magpie --store .magpie --actor notes-agent note put \
   --title "Ops Handoff" \
   --body "Ship daily closeout."
 ```
@@ -157,7 +171,7 @@ Create or update a note:
 For longer content:
 
 ```sh
-./infobase --store .infobase --actor notes-agent note put \
+./magpie --store .magpie --actor notes-agent note put \
   --title "Weekly Review" \
   --body-file ./weekly-review.md \
   --sensitivity internal
@@ -166,18 +180,18 @@ For longer content:
 List notes:
 
 ```sh
-./infobase --store .infobase --actor notes-agent note list
+./magpie --store .magpie --actor notes-agent note list
 ```
 
 Read a specific note:
 
 ```sh
-./infobase --store .infobase --actor notes-agent note get --id note:...
+./magpie --store .magpie --actor notes-agent note get --id note:...
 ```
 
 ## Book Accounting Basis
 
-InfoBase is opinionated about accounting methods. The book has exactly one active accounting basis:
+Magpie is opinionated about accounting methods. The book has exactly one active accounting basis:
 
 - `cash`: recognize income when cash is received and expenses when cash is paid.
 - `modified_cash`: cash treatment for ordinary income and expenses, with explicit balance-sheet treatment for sales tax liabilities, payroll tax liabilities, loan principal, and capitalized fixed assets.
@@ -186,17 +200,17 @@ InfoBase is opinionated about accounting methods. The book has exactly one activ
 New stores default to `cash`. Check the current setting before an agent posts entries:
 
 ```sh
-./infobase --store .infobase --actor owner book settings get
+./magpie --store .magpie --actor owner book settings get
 ```
 
 Set the accounting basis before entering journal activity:
 
 ```sh
-./infobase --store .infobase --actor owner book settings set \
+./magpie --store .magpie --actor owner book settings set \
   --accounting-basis accrual
 ```
 
-Changing the accounting basis requires `settings:manage`, which the default `Owner` and `Admin` roles have. InfoBase rejects basis changes after journal entries exist, because changing accounting method after postings would require a controlled migration or restatement workflow.
+Changing the accounting basis requires `settings:manage`, which the default `Owner` and `Admin` roles have. Magpie rejects basis changes after journal entries exist, because changing accounting method after postings would require a controlled migration or restatement workflow.
 
 Every new journal entry is stamped with the active `accounting_basis`. If an agent submits a journal entry with an explicit `accounting_basis` that does not match the active book setting, the write is rejected.
 
@@ -220,20 +234,20 @@ For vendor bills:
 - Cash or modified cash: expense when paid, except for explicit modified-cash balance-sheet items such as fixed assets, loans, and taxes.
 - Accrual: on bill, debit expense or asset and credit accounts payable; on payment, debit accounts payable and credit cash.
 
-InfoBase prevents ordinary agents from bypassing these rules with generic manual journals, and invoice workflows enforce the A/R versus cash-basis posting semantics directly.
+Magpie prevents ordinary agents from bypassing these rules with generic manual journals, and invoice workflows enforce the A/R versus cash-basis posting semantics directly.
 
 ## Ledger Workflow
 
 Create accounts as an actor with `ledger:write`. Assigning a role at create time also requires `chart:manage`:
 
 ```sh
-./infobase --store .infobase --actor owner ledger account create \
+./magpie --store .magpie --actor owner ledger account create \
   --number 1000 \
   --name Checking \
   --type asset \
   --role bank_account
 
-./infobase --store .infobase --actor owner ledger account create \
+./magpie --store .magpie --actor owner ledger account create \
   --number 4000 \
   --name "Consulting Revenue" \
   --type revenue \
@@ -245,7 +259,7 @@ Account numbers are optional but first-class. They are stored separately from ac
 Renumber an existing account:
 
 ```sh
-./infobase --store .infobase --actor owner ledger account number set \
+./magpie --store .magpie --actor owner ledger account number set \
   --account-id acct:CHECKING_ID \
   --number 1010
 ```
@@ -259,23 +273,23 @@ Account number rules:
 List accounts and capture the generated account IDs:
 
 ```sh
-./infobase --store .infobase --actor owner ledger account list
+./magpie --store .magpie --actor owner ledger account list
 ```
 
 ## Account Roles
 
-Account roles tell InfoBase what an account means inside accounting workflows. Type alone is not enough: an `asset` may be cash, accounts receivable, inventory, a fixed asset, or a contra-asset.
+Account roles tell Magpie what an account means inside accounting workflows. Type alone is not enough: an `asset` may be cash, accounts receivable, inventory, a fixed asset, or a contra-asset.
 
 List supported roles:
 
 ```sh
-./infobase --store .infobase --actor owner ledger account role list
+./magpie --store .magpie --actor owner ledger account role list
 ```
 
 Assign or update a role as an actor with `chart:manage`:
 
 ```sh
-./infobase --store .infobase --actor owner ledger account role set \
+./magpie --store .magpie --actor owner ledger account role set \
   --account-id acct:CHECKING_ID \
   --role operating_cash
 ```
@@ -294,7 +308,7 @@ Ledger accounts can carry first-class external source references for bank sync, 
 Example external bank account:
 
 ```sh
-./infobase --store .infobase --actor owner ledger account create \
+./magpie --store .magpie --actor owner ledger account create \
   --number 1010 \
   --name "Operating Checking ****1234" \
   --type asset \
@@ -360,14 +374,14 @@ Example non-bank chart account mapping:
 Submit JSON account definitions with:
 
 ```sh
-./infobase --store .infobase --actor owner ledger account create-json \
+./magpie --store .magpie --actor owner ledger account create-json \
   --file ./account.json
 ```
 
 Add or update an external ref on an existing account:
 
 ```sh
-./infobase --store .infobase --actor owner ledger account external-ref set \
+./magpie --store .magpie --actor owner ledger account external-ref set \
   --account-id acct:OPERATING_BANK_ID \
   --external-source bank_provider \
   --external-id bank-account-1 \
@@ -394,7 +408,7 @@ Validation rules:
 
 ## Customer And Invoice Workflow
 
-Invoices are first-class source documents. Agents should create customers and invoices, then let InfoBase generate workflow-originated journal entries according to the active accounting basis. InfoBase is bank and financial-institution agnostic: the AI bookkeeping agent interprets source-specific exports and submits normalized JSON with external references.
+Invoices are first-class source documents. Agents should create customers and invoices, then let Magpie generate workflow-originated journal entries according to the active accounting basis. Magpie is bank and financial-institution agnostic: the AI bookkeeping agent interprets source-specific exports and submits normalized JSON with external references.
 
 Minimum account roles for service invoices:
 
@@ -403,7 +417,7 @@ Minimum account roles for service invoices:
 - `sales_tax_payable` when the invoice includes sales tax.
 - `accounts_receivable` when the book uses `accrual`.
 
-For normalized external imports, line-level `revenue_account_id` may be omitted. InfoBase resolves omitted revenue accounts to the configured `default_service_revenue` account and fails the import if that role is not configured. Line-level `tax_amount_cents` may also be supplied; InfoBase sums line taxes into invoice-level `tax_amount_cents` when the invoice-level value is omitted, and rejects mismatches when both are present.
+For normalized external imports, line-level `revenue_account_id` may be omitted. Magpie resolves omitted revenue accounts to the configured `default_service_revenue` account and fails the import if that role is not configured. Line-level `tax_amount_cents` may also be supplied; Magpie sums line taxes into invoice-level `tax_amount_cents` when the invoice-level value is omitted, and rejects mismatches when both are present.
 
 Create or update a customer:
 
@@ -422,7 +436,7 @@ Create or update a customer:
 ```
 
 ```sh
-./infobase --store .infobase --actor bookkeeping-agent customer create-json \
+./magpie --store .magpie --actor bookkeeping-agent customer create-json \
   --file ./customer.json
 ```
 
@@ -457,11 +471,11 @@ Create an invoice:
 ```
 
 ```sh
-./infobase --store .infobase --actor bookkeeping-agent invoice create-json \
+./magpie --store .magpie --actor bookkeeping-agent invoice create-json \
   --file ./invoice.json
 ```
 
-For source imports, prefer one normalized external invoice payload. This keeps source-specific parsing in the agent while giving InfoBase a first-class, idempotent workflow:
+For source imports, prefer one normalized external invoice payload. This keeps source-specific parsing in the agent while giving Magpie a first-class, idempotent workflow:
 
 ```json
 {
@@ -513,7 +527,7 @@ For source imports, prefer one normalized external invoice payload. This keeps s
 ```
 
 ```sh
-./infobase --store .infobase --actor bookkeeping-agent invoice import-json \
+./magpie --store .magpie --actor bookkeeping-agent invoice import-json \
   --file ./external-invoice.json
 ```
 
@@ -522,7 +536,7 @@ For source imports, prefer one normalized external invoice payload. This keeps s
 Post the invoice:
 
 ```sh
-./infobase --store .infobase --actor bookkeeping-agent invoice post \
+./magpie --store .magpie --actor bookkeeping-agent invoice post \
   --invoice-id inv:...
 ```
 
@@ -534,7 +548,7 @@ Posting behavior:
 Mark the invoice paid:
 
 ```sh
-./infobase --store .infobase --actor bookkeeping-agent invoice mark-paid \
+./magpie --store .magpie --actor bookkeeping-agent invoice mark-paid \
   --invoice-id inv:... \
   --cash-account-id acct:OPERATING_CASH_ID \
   --paid-date 2026-06-15 \
@@ -552,7 +566,7 @@ Payment behavior:
 Reverse an incorrect payment:
 
 ```sh
-./infobase --store .infobase --actor bookkeeping-agent invoice reverse-payment \
+./magpie --store .magpie --actor bookkeeping-agent invoice reverse-payment \
   --invoice-id inv:... \
   --payment-id pay:... \
   --reversal-date 2026-06-16 \
@@ -566,15 +580,15 @@ Workflow journals are stored with `origin: "workflow"`, `workflow`, `posting_sem
 List source documents:
 
 ```sh
-./infobase --store .infobase --actor bookkeeping-agent customer get --customer-id cust:...
-./infobase --store .infobase --actor bookkeeping-agent customer list
-./infobase --store .infobase --actor bookkeeping-agent invoice get --invoice-id inv:...
-./infobase --store .infobase --actor bookkeeping-agent invoice list
+./magpie --store .magpie --actor bookkeeping-agent customer get --customer-id cust:...
+./magpie --store .magpie --actor bookkeeping-agent customer list
+./magpie --store .magpie --actor bookkeeping-agent invoice get --invoice-id inv:...
+./magpie --store .magpie --actor bookkeeping-agent invoice list
 ```
 
 ## Payout And External Transfer Workflow
 
-Payouts are first-class source documents for provider deposits and other external transfers into a bank account. InfoBase does not parse provider exports directly. The AI bookkeeping agent interprets source-specific data, maps it to existing InfoBase accounts, and submits normalized JSON with external references.
+Payouts are first-class source documents for provider deposits and other external transfers into a bank account. Magpie does not parse provider exports directly. The AI bookkeeping agent interprets source-specific data, maps it to existing Magpie accounts, and submits normalized JSON with external references.
 
 Minimum account roles:
 
@@ -608,7 +622,7 @@ Import a normalized payout:
 ```
 
 ```sh
-./infobase --store .infobase --actor bookkeeping-agent payout import-json \
+./magpie --store .magpie --actor bookkeeping-agent payout import-json \
   --file ./payout.json
 ```
 
@@ -622,8 +636,8 @@ Workflow journals are stamped with the active accounting basis, source document 
 List payout source documents:
 
 ```sh
-./infobase --store .infobase --actor bookkeeping-agent payout get --payout-id payout:...
-./infobase --store .infobase --actor bookkeeping-agent payout list
+./magpie --store .magpie --actor bookkeeping-agent payout get --payout-id payout:...
+./magpie --store .magpie --actor bookkeeping-agent payout list
 ```
 
 ## Manual Journal Adjustments
@@ -657,13 +671,13 @@ Create a balanced manual journal JSON file:
 Submit it:
 
 ```sh
-./infobase --store .infobase --actor owner ledger journal create \
+./magpie --store .magpie --actor owner ledger journal create \
   --file ./journal-entry.json
 ```
 
 The write is rejected unless total debits exactly equal total credits.
 
-If `source` and `source_key` are both present, InfoBase uses them as an idempotency key. Re-submitting the same source-tagged entry returns the existing entry instead of creating a duplicate.
+If `source` and `source_key` are both present, Magpie uses them as an idempotency key. Re-submitting the same source-tagged entry returns the existing entry instead of creating a duplicate.
 
 Manual entries are stored with:
 
@@ -678,17 +692,17 @@ Manual entries are stored with:
 List journal entries:
 
 ```sh
-./infobase --store .infobase --actor owner ledger journal list
+./magpie --store .magpie --actor owner ledger journal list
 ```
 
 ## Agent-Mapped External Exports
 
-InfoBase does not include a QuickBooks-specific CSV/IIF/QBXML parser in the CLI. The agent is responsible for reading exports from QuickBooks or any other external system and mapping them into InfoBase's canonical manual journal JSON when doing a controlled migration or adjustment.
+Magpie does not include a QuickBooks-specific CSV/IIF/QBXML parser in the CLI. The agent is responsible for reading exports from QuickBooks or any other external system and mapping them into Magpie's canonical manual journal JSON when doing a controlled migration or adjustment.
 
 The expected agent flow is:
 
 1. Read the external export.
-2. Use `ledger account list` to find exact InfoBase account IDs.
+2. Use `ledger account list` to find exact Magpie account IDs.
 3. Build balanced manual journal JSON with `manual_reason`.
 4. Include `source` and `source_key` from the external row or transaction ID.
 5. Submit each canonical entry with `ledger journal create --file FILE`.
@@ -718,31 +732,31 @@ Example agent-produced journal entry:
 Submit it:
 
 ```sh
-./infobase --store .infobase --actor owner ledger journal create \
+./magpie --store .magpie --actor owner ledger journal create \
   --file ./agent-mapped-entry.json
 ```
 
-This keeps InfoBase's CLI narrow and opinionated. The CLI validates permissions, account existence, double-entry balance, source-key idempotency, manual-journal authorization, encryption, and immutable storage; the agent handles source-specific interpretation. Ordinary ongoing bookkeeping should move to domain workflows rather than generic manual journals.
+This keeps Magpie's CLI narrow and opinionated. The CLI validates permissions, account existence, double-entry balance, source-key idempotency, manual-journal authorization, encryption, and immutable storage; the agent handles source-specific interpretation. Ordinary ongoing bookkeeping should move to domain workflows rather than generic manual journals.
 
 ## Snapshots And Audit
 
 Create a named recovery point before a risky workflow:
 
 ```sh
-./infobase --store .infobase --actor owner snapshot create \
+./magpie --store .magpie --actor owner snapshot create \
   --name before-agent-ledger-workflow-2026-06-29
 ```
 
 Read reconstructed state:
 
 ```sh
-./infobase --store .infobase --actor owner state
+./magpie --store .magpie --actor owner state
 ```
 
 Read immutable audit nodes:
 
 ```sh
-./infobase --store .infobase --actor owner audit
+./magpie --store .magpie --actor owner audit
 ```
 
 Both `state` and `audit` require `audit:read`.
@@ -788,19 +802,19 @@ snapshot create --name NAME
 Global flags:
 
 ```text
---store DIR        store directory, default .infobase
+--store DIR        store directory, default .magpie
 --actor USER_ID    caller identity, default owner
 --role ROLE        optional role assertion; must match the actor's assigned role
 ```
 
 ## Storage Format
 
-The default store directory is `.infobase/`.
+The default store directory is `.magpie/`.
 
-- `.infobase/objects/nodes/`: immutable JSON node files.
-- `.infobase/refs/root`: current live root hash.
-- `.infobase/refs/named/`: named snapshot roots.
-- `.infobase/keys/data.key`: local AES-256-GCM data key when `INFOBASE_DATA_KEY` is not supplied.
+- `.magpie/objects/nodes/`: immutable JSON node files.
+- `.magpie/refs/root`: current live root hash.
+- `.magpie/refs/named/`: named snapshot roots.
+- `.magpie/keys/data.key`: local AES-256-GCM data key when `JAYBASE_DATA_KEY` is not supplied.
 
 Business payloads are encrypted in node files as:
 
@@ -822,4 +836,4 @@ Phase 1 is local-only. There is no network listener and no transport surface.
 
 Important current limitation: authentication is not implemented yet. The CLI accepts `--actor` as caller context and checks it against stored RBAC assignments, but it does not prove the operating-system user is that actor. For now, run the binary only in trusted local automation or behind a wrapper that authenticates the caller.
 
-Production deployments should provide `INFOBASE_DATA_KEY` from a managed secret store or KMS and keep local key files out of backups.
+Production deployments should provide `JAYBASE_DATA_KEY` from a managed secret store or KMS and keep local key files out of backups.

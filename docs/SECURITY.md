@@ -17,7 +17,7 @@ This document records the Phase 1 controls intended to support SOC 2, PCI DSS, a
 
 ## Production Requirements Before External Deployment
 
-- Provide `INFOBASE_DATA_KEY` from a managed KMS or secret manager.
+- Provide `JAYBASE_DATA_KEY` from a managed KMS or secret manager.
 - Add authenticated user provisioning instead of local CLI actor flags.
 - Add signed command envelopes for non-interactive agents.
 - Add centralized audit export with retention policies.

@@ -1,4 +1,4 @@
-package infobase
+package magpie
 
 import "sort"
 

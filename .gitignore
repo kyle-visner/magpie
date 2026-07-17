@@ -1,4 +1,7 @@
 .infobase/
+/magpie
+.magpie/
 /infobase
 *.test
 coverage.out
+.benchmarks/

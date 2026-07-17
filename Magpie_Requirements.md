@@ -1,4 +1,4 @@
-# InfoBase: Opinionated Unified Information Fabric
+# Magpie: Opinionated Unified Information Fabric
 ## Product Requirements Document (PRD) for SMBs
 
 **Version:** 0.7  
@@ -17,7 +17,7 @@
 
 ## 1. Executive Summary & Vision
 
-InfoBase is an **opinionated, unified information storage and access system** designed specifically for small and medium businesses (SMBs). It functions as a "data fabric" that sits above and beyond traditional databases.
+Magpie is an **opinionated, unified information storage and access system** designed specifically for small and medium businesses (SMBs). It functions as a "data fabric" that sits above and beyond traditional databases.
 
 The core idea is to replace the fragmented, siloed reality most SMBs live with today:
 
@@ -109,7 +109,7 @@ In the agentic era, the two most critical properties of good data governance are
 - **Recoverability** — Any destructive, incorrect, or malicious sequence of actions must be trivial to undo, audit, and replay from a known-good state.
 
 **Foundational Requirement**:  
-**Everything in InfoBase must be version-controlled, recoverable, and replayable at the storage level.**
+**Everything in Magpie must be version-controlled, recoverable, and replayable at the storage level.**
 
 - Every mutation — whether a financial journal entry, a Markdown note edit, a CRM record change, a permission update, or a bulk import — must create an immutable, versioned event.
 - The storage engine must support full history, point-in-time reconstruction, undo/replay of action sequences, and time-travel queries.
@@ -195,7 +195,7 @@ This is one of the most important requirements.
   - IIF format
   - QBXML where available
   - Future: Direct API sync (read-heavy initially)
-- Intelligent mapping from QuickBooks data model into InfoBase's opinionated ledger model.
+- Intelligent mapping from QuickBooks data model into Magpie's opinionated ledger model.
 - Preserve historical data and relationships.
 
 **CRM Data**
@@ -225,7 +225,7 @@ This is one of the most important requirements.
 
 This section is directly derived from Design Tenet 4.3 ("Only One Way to Do Things").
 
-**Core Rule**: AI agents (and human power users) **must not** be given the ability to write arbitrary SQL, graph queries, vector searches, or raw mutations. All interaction with the InfoBase storage engine happens exclusively through the official, versioned CLI (and later through controlled SDKs that expose the exact same semantics).
+**Core Rule**: AI agents (and human power users) **must not** be given the ability to write arbitrary SQL, graph queries, vector searches, or raw mutations. All interaction with the Magpie storage engine happens exclusively through the official, versioned CLI (and later through controlled SDKs that expose the exact same semantics).
 
 Every CLI mutation command **must** produce an immutable, versioned event that can be audited, undone, or replayed (see Design Tenet 4.4 on Blast Radius + Recoverability).
 
@@ -342,7 +342,7 @@ This constraint is intentional and non-negotiable for maintaining long-term syst
    - Self-hosted binary only? Cloud SaaS offering? Hybrid / air-gapped support?
 
 6. **Binary / Rich Media Handling**
-   - Should actual meeting audio/video files be stored inside InfoBase (with full RBAC) or should we store only metadata + transcription and reference external secure storage?
+   - Should actual meeting audio/video files be stored inside Magpie (with full RBAC) or should we store only metadata + transcription and reference external secure storage?
 
 7. **Pricing, Packaging & Go-to-Market**
    - How should this be packaged and priced for SMBs (per user, per company, usage-based, etc.)?
