@@ -10,6 +10,10 @@ It is built around one rule: agents and humans use the same CLI, and the CLI enf
 - Jaybase is the extracted AI-native storage project published separately as the private module `github.com/kyle-visner/jaybase`.
 - Magpie depends on Jaybase as a Go module; configure private module access with `GOPRIVATE=github.com/kyle-visner/*` when building from a fresh environment.
 
+## License
+
+AGPL-3.0-or-later. See `LICENSE`.
+
 ## Current Capabilities
 
 - Canonical local CLI in `cmd/magpie`.
