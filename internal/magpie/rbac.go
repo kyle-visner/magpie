@@ -115,7 +115,7 @@ func (s *Store) UpsertRole(ctx Context, role Role) (string, error) {
 		}
 	}
 	role.Permissions = sortedPermissions(role.Permissions)
-	return s.appendEvent(ctx, "rbac.role", "role:"+role.Name, "rbac role upsert", wrapEvent("role.upsert", roleUpsertPayload{Role: role}), true)
+	return s.appendEventAt(ctx, "rbac.role", "role:"+role.Name, "rbac role upsert", wrapEvent("role.upsert", roleUpsertPayload{Role: role}), st.Root)
 }
 
 func (s *Store) RepairDefaultRoles(ctx Context) (DefaultRoleRepairResult, string, error) {
@@ -140,7 +140,7 @@ func (s *Store) RepairDefaultRoles(ctx Context) (DefaultRoleRepairResult, string
 		if exists && current.Name == repaired.Name && samePermissions(current.Permissions, repaired.Permissions) {
 			continue
 		}
-		hash, err := s.appendEvent(ctx, "rbac.role", "role:"+name, "rbac defaults repair", wrapEvent("role.upsert", roleUpsertPayload{Role: repaired}), true)
+		hash, err := s.appendEventAt(ctx, "rbac.role", "role:"+name, "rbac defaults repair", wrapEvent("role.upsert", roleUpsertPayload{Role: repaired}), root)
 		if err != nil {
 			return DefaultRoleRepairResult{}, "", err
 		}
@@ -165,7 +165,7 @@ func (s *Store) UpsertUser(ctx Context, user User) (string, error) {
 	if _, ok := st.Roles[user.Role]; !ok {
 		return "", appErr(ErrValidation, "role %q does not exist", user.Role)
 	}
-	return s.appendEvent(ctx, "rbac.user", "user:"+user.ID, "rbac user upsert", wrapEvent("user.upsert", userUpsertPayload{User: user}), true)
+	return s.appendEventAt(ctx, "rbac.user", "user:"+user.ID, "rbac user upsert", wrapEvent("user.upsert", userUpsertPayload{User: user}), st.Root)
 }
 
 func PermissionNames() []string {

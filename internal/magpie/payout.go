@@ -64,7 +64,7 @@ func (s *Store) ImportPayout(ctx Context, payout Payout) (Payout, string, error)
 		payout.UpdatedAt = now
 		payout.CreatedBy = ctx.Actor
 		payout.UpdatedBy = ctx.Actor
-		hash, err := s.appendEvent(ctx, "payout", payout.ID, "payout create", wrapEvent("payout.create", payoutCreatePayload{Payout: payout}), true)
+		hash, err := s.appendEventAt(ctx, "payout", payout.ID, "payout create", wrapEvent("payout.create", payoutCreatePayload{Payout: payout}), root)
 		if err != nil {
 			return Payout{}, "", err
 		}
@@ -130,7 +130,7 @@ func (s *Store) ImportPayout(ctx Context, payout Payout) (Payout, string, error)
 	payout.JournalEntryIDs = journalIDs
 	payout.UpdatedAt = s.now().UTC()
 	payout.UpdatedBy = ctx.Actor
-	hash, err := s.appendEvent(ctx, "payout", payout.ID, "payout journal links update", wrapEvent("payout.update", payoutUpdatePayload{Payout: payout}), true)
+	hash, err := s.appendEventAt(ctx, "payout", payout.ID, "payout journal links update", wrapEvent("payout.update", payoutUpdatePayload{Payout: payout}), root)
 	if err != nil {
 		return Payout{}, "", err
 	}

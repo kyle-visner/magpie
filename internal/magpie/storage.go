@@ -13,8 +13,25 @@ import (
 )
 
 type Store struct {
-	db  *jaybase.Store
+	db  storageBackend
 	now func() time.Time
+}
+
+type storageBackend interface {
+	Close() error
+	Dir() string
+	CurrentRoot() (string, error)
+	AppendAt(jaybase.Context, jaybase.AppendOptions, string) (string, error)
+	NodesFromRoot(string) ([]jaybase.Node, error)
+	AuditLog() ([]jaybase.Node, error)
+	NodePayload(jaybase.Node) ([]byte, error)
+	NamedRef(string) (string, error)
+	WriteNamedRefAt(string, string, string) error
+	NodePath(string) string
+}
+
+type localStorageBackend struct {
+	store *jaybase.Store
 }
 
 type Node = jaybase.Node
@@ -30,10 +47,58 @@ func OpenStore(dir string) (*Store, error) {
 	if err != nil {
 		return nil, storageError(err)
 	}
+	return newStore(&localStorageBackend{store: db}), nil
+}
+
+func newStore(db storageBackend) *Store {
 	return &Store{
 		db:  db,
 		now: func() time.Time { return time.Now().UTC() },
-	}, nil
+	}
+}
+
+func (s *Store) Close() error {
+	return storageError(s.db.Close())
+}
+
+func (b *localStorageBackend) Close() error {
+	return b.store.Close()
+}
+
+func (b *localStorageBackend) Dir() string {
+	return b.store.Dir()
+}
+
+func (b *localStorageBackend) CurrentRoot() (string, error) {
+	return b.store.CurrentRoot()
+}
+
+func (b *localStorageBackend) AppendAt(ctx jaybase.Context, options jaybase.AppendOptions, expectedRoot string) (string, error) {
+	return b.store.AppendAt(ctx, options, expectedRoot)
+}
+
+func (b *localStorageBackend) NodesFromRoot(root string) ([]jaybase.Node, error) {
+	return b.store.NodesFromRoot(root)
+}
+
+func (b *localStorageBackend) AuditLog() ([]jaybase.Node, error) {
+	return b.store.AuditLog()
+}
+
+func (b *localStorageBackend) NodePayload(node jaybase.Node) ([]byte, error) {
+	return b.store.NodePayload(node)
+}
+
+func (b *localStorageBackend) NamedRef(name string) (string, error) {
+	return b.store.NamedRef(name)
+}
+
+func (b *localStorageBackend) WriteNamedRefAt(name, root, expectedRoot string) error {
+	return b.store.WriteNamedRefAt(name, root, expectedRoot)
+}
+
+func (b *localStorageBackend) NodePath(hash string) string {
+	return b.store.NodePath(hash)
 }
 
 func (s *Store) Dir() string {
@@ -52,6 +117,32 @@ func (s *Store) nodePath(hash string) string {
 	return s.db.NodePath(hash)
 }
 
+// writeNamedRef gives local and hosted backends the same compare-and-swap
+// behavior. A failed write is reconciled against the durable value so a lost
+// success response or a concurrent writer choosing the same root is idempotent.
+func (s *Store) writeNamedRef(name, root string) error {
+	expectedRoot, err := s.db.NamedRef(name)
+	if err != nil {
+		var dbErr *jaybase.AppError
+		if !errors.As(err, &dbErr) || dbErr.Code != jaybase.ErrNotFound {
+			return storageError(err)
+		}
+		expectedRoot = ""
+	} else if expectedRoot == root {
+		return nil
+	}
+
+	if err := s.db.WriteNamedRefAt(name, root, expectedRoot); err != nil {
+		writeErr := storageError(err)
+		current, readErr := s.db.NamedRef(name)
+		if readErr == nil && current == root {
+			return nil
+		}
+		return writeErr
+	}
+	return nil
+}
+
 func (s *Store) WriteInitialRoot(ctx Context) (string, error) {
 	root, err := s.currentRoot()
 	if err != nil {
@@ -61,22 +152,44 @@ func (s *Store) WriteInitialRoot(ctx Context) (string, error) {
 		return root, nil
 	}
 	event := initEvent()
-	return s.appendEvent(ctx, "store.init", "", "store init", event, true)
+	root, err = s.appendEventAt(ctx, "store.init", "", "store init", event, root)
+	if err == nil {
+		return root, nil
+	}
+	var appError *AppError
+	if !errors.As(err, &appError) || appError.Code != ErrConflict {
+		return "", err
+	}
+	current, currentErr := s.currentRoot()
+	if currentErr == nil && current != "" {
+		return current, nil
+	}
+	return "", err
 }
 
 func (s *Store) appendEvent(ctx Context, typ, entityID, command string, payload any, skipRootCheck bool) (string, error) {
+	expectedRoot, err := s.currentRoot()
+	if err != nil {
+		return "", err
+	}
 	if !skipRootCheck {
-		if _, err := s.LoadState(); err != nil {
+		state, err := s.LoadState()
+		if err != nil {
 			return "", err
 		}
+		expectedRoot = state.Root
 	}
-	hash, err := s.db.Append(jaybase.Context{Actor: ctx.Actor, Role: ctx.Role}, jaybase.AppendOptions{
+	return s.appendEventAt(ctx, typ, entityID, command, payload, expectedRoot)
+}
+
+func (s *Store) appendEventAt(ctx Context, typ, entityID, command string, payload any, expectedRoot string) (string, error) {
+	hash, err := s.db.AppendAt(jaybase.Context{Actor: ctx.Actor, Role: ctx.Role}, jaybase.AppendOptions{
 		Type:      typ,
 		EntityID:  entityID,
 		Command:   command,
 		Payload:   payload,
 		CreatedAt: s.now().UTC(),
-	})
+	}, expectedRoot)
 	if err != nil {
 		return "", storageError(err)
 	}

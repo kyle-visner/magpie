@@ -110,7 +110,7 @@ func (s *Store) UpsertCustomer(ctx Context, customer Customer) (Customer, string
 	}
 	customer.UpdatedAt = now
 	customer.UpdatedBy = ctx.Actor
-	hash, err := s.appendEvent(ctx, "customer", customer.ID, "customer upsert", wrapEvent("customer.upsert", customerUpsertPayload{Customer: customer}), true)
+	hash, err := s.appendEventAt(ctx, "customer", customer.ID, "customer upsert", wrapEvent("customer.upsert", customerUpsertPayload{Customer: customer}), st.Root)
 	return customer, hash, err
 }
 
@@ -200,7 +200,7 @@ func (s *Store) CreateInvoice(ctx Context, invoice Invoice) (Invoice, string, er
 	invoice.UpdatedAt = now
 	invoice.CreatedBy = ctx.Actor
 	invoice.UpdatedBy = ctx.Actor
-	hash, err := s.appendEvent(ctx, "invoice", invoice.ID, "invoice create", wrapEvent("invoice.create", invoiceCreatePayload{Invoice: invoice}), true)
+	hash, err := s.appendEventAt(ctx, "invoice", invoice.ID, "invoice create", wrapEvent("invoice.create", invoiceCreatePayload{Invoice: invoice}), st.Root)
 	return invoice, hash, err
 }
 
@@ -287,7 +287,7 @@ func (s *Store) PostInvoice(ctx Context, invoiceID string) (Invoice, string, err
 	}
 	invoice.UpdatedAt = s.now().UTC()
 	invoice.UpdatedBy = ctx.Actor
-	hash, err := s.appendEvent(ctx, "invoice", invoice.ID, "invoice post", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), true)
+	hash, err := s.appendEventAt(ctx, "invoice", invoice.ID, "invoice post", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), root)
 	if err != nil {
 		return Invoice{}, "", err
 	}
@@ -399,7 +399,7 @@ func (s *Store) MarkInvoicePaid(ctx Context, invoiceID string, req InvoicePaymen
 	invoice.Status = invoiceStatusFromPayments(invoice)
 	invoice.UpdatedAt = s.now().UTC()
 	invoice.UpdatedBy = ctx.Actor
-	hash, err := s.appendEvent(ctx, "invoice", invoice.ID, "invoice mark-paid", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), true)
+	hash, err := s.appendEventAt(ctx, "invoice", invoice.ID, "invoice mark-paid", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), root)
 	if err != nil {
 		return Invoice{}, "", err
 	}
@@ -493,7 +493,7 @@ func (s *Store) ReverseInvoicePayment(ctx Context, invoiceID string, req Invoice
 	invoice.Status = invoiceStatusFromPayments(invoice)
 	invoice.UpdatedAt = s.now().UTC()
 	invoice.UpdatedBy = ctx.Actor
-	hash, err := s.appendEvent(ctx, "invoice", invoice.ID, "invoice payment reverse", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), true)
+	hash, err := s.appendEventAt(ctx, "invoice", invoice.ID, "invoice payment reverse", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), root)
 	if err != nil {
 		return Invoice{}, "", err
 	}

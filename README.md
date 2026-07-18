@@ -16,8 +16,9 @@ AGPL-3.0-or-later. See `LICENSE`.
 
 ## Current Capabilities
 
-- Canonical local CLI in `cmd/magpie`.
+- Canonical CLI in `cmd/magpie` with local embedded and hosted Jaybase backends.
 - Extracted custom immutable Merkle-DAG-style storage with SHA-256-addressed JSON nodes through Jaybase.
+- Bearer-authenticated hosted Jaybase access over HTTPS with paginated replay, optimistic concurrency, idempotent writes, and remote named refs.
 - AES-256-GCM encryption for stored node payloads.
 - Unified RBAC for ledger, notes, snapshots, and audit reads.
 - Double-entry ledger validation before persistence.
@@ -77,6 +78,25 @@ Give your agent a fixed command template and tell it to parse stdout as JSON:
   COMMAND...
 ```
 
+For the hosted Jaybase service, provide the origin and bearer credential through
+the environment. Do not put the token in a command-line flag, URL, payload, log,
+or idempotency key:
+
+```sh
+export JAYBASE_URL=https://jaybase.example.com
+export JAYBASE_TOKEN='writer-token-from-the-secret-manager'
+
+./magpie \
+  --actor AGENT_USER_ID \
+  COMMAND...
+```
+
+`--jaybase-url` may override the origin, but the token is accepted only through
+`JAYBASE_TOKEN`. Hosted requests fetch decrypted payloads only when replaying
+state; audit output remains metadata-only. Writes use Jaybase's `expected_root`
+and `Idempotency-Key` contract and return a conflict instead of overwriting a
+newer root.
+
 For development without building first, use:
 
 ```sh
@@ -112,6 +132,13 @@ Initialize a local store:
 
 ```sh
 ./magpie --store .magpie init
+```
+
+Or initialize an empty hosted store after setting `JAYBASE_URL` and a writer
+`JAYBASE_TOKEN`:
+
+```sh
+./magpie --actor owner init
 ```
 
 The default initialized actor is `owner` with the `Owner` role.
@@ -807,13 +834,28 @@ Global flags:
 
 ```text
 --store DIR        store directory, default .magpie
+--jaybase-url URL  hosted Jaybase HTTPS origin, default JAYBASE_URL
 --actor USER_ID    caller identity, default owner
 --role ROLE        optional role assertion; must match the actor's assigned role
 ```
 
-## Storage Format
+`--store` and hosted mode are mutually exclusive. HTTP is accepted only for a
+loopback development server; non-loopback Jaybase origins must use HTTPS.
 
-The default store directory is `.magpie/`.
+## Storage Backends
+
+In hosted mode, Magpie uses only Jaybase's authenticated `/v1` API. It does not
+read or mount the server's data volume, refs, or encryption key. Jaybase owns
+transport authentication, concurrent append serialization, encryption at rest,
+and hosted snapshots/backups.
+
+Each hosted command currently reconstructs state by fetching and decrypting the
+complete event history. This keeps local and hosted behavior identical, but its
+latency, bandwidth, and server work grow linearly with history size. Large or
+high-frequency ledgers will need incremental state caching, compaction, or a
+server-side materialized-state endpoint before this backend scales efficiently.
+
+In local mode, the default store directory is `.magpie/`:
 
 - `.magpie/objects/nodes/`: immutable JSON node files.
 - `.magpie/refs/root`: current live root hash.
@@ -834,10 +876,19 @@ Business payloads are encrypted in node files as:
 
 ## Security Notes
 
-The CLI is the only supported interaction path. Business operations call the same storage and RBAC layer used by tests, so ledger invariants and permissions are enforced before persistence.
+The CLI is the only supported Magpie interaction path. Business operations call
+the same accounting and RBAC layer in local and hosted modes, so ledger
+invariants and permissions are enforced before persistence.
 
-Phase 1 is local-only. There is no network listener and no transport surface.
+Hosted Jaybase authenticates and authorizes storage access with bearer
+credentials. It does not authenticate Magpie's domain-level `--actor`: the CLI
+still accepts that caller context and checks it against Magpie RBAC assignments
+without proving that the token principal is the same person. Run Magpie only in
+trusted automation or behind a wrapper that binds the authenticated caller to
+the permitted `--actor` value.
 
-Important current limitation: authentication is not implemented yet. The CLI accepts `--actor` as caller context and checks it against stored RBAC assignments, but it does not prove the operating-system user is that actor. For now, run the binary only in trusted local automation or behind a wrapper that authenticates the caller.
-
-Production deployments should provide `JAYBASE_DATA_KEY` from a managed secret store or KMS and keep local key files out of backups.
+Keep `JAYBASE_TOKEN` in a secret manager, grant the lowest hosted role needed,
+and never pass it on the command line. Local production deployments should
+provide `JAYBASE_DATA_KEY` from a managed secret store or KMS and keep local key
+files out of backups. Hosted deployments manage the data key and encrypted
+backups on the Jaybase server instead.

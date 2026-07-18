@@ -73,6 +73,11 @@ func newBenchmarkMagpieStore(b *testing.B) (*Store, Context) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	b.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			b.Errorf("close store: %v", err)
+		}
+	})
 	store.now = func() time.Time {
 		return time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	}

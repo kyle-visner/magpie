@@ -14,11 +14,14 @@ This document records the Phase 1 controls intended to support SOC 2, PCI DSS, a
 - Agent-mapped external journal entries are idempotent by source key to reduce duplicate financial records.
 - Audit history is reconstructed from the same immutable DAG used as source of truth.
 - The Phase 1 CLI has no SQL, graph-query, vector-query, or raw mutation escape hatch.
+- Hosted Jaybase access requires a bearer token and HTTPS outside loopback development.
+- Hosted appends use optimistic root preconditions and stable idempotency keys, so concurrent changes and ambiguous retries cannot silently duplicate or overwrite events.
+- Hosted replay follows the authenticated, payload-explicit, paginated `/v1/events` API rather than reading Jaybase data files directly.
 
 ## Production Requirements Before External Deployment
 
 - Provide `JAYBASE_DATA_KEY` from a managed KMS or secret manager.
-- Add authenticated user provisioning instead of local CLI actor flags.
+- Bind authenticated Jaybase principals to allowed Magpie actor identities instead of trusting unrestricted local CLI actor flags.
 - Add signed command envelopes for non-interactive agents.
 - Add centralized audit export with retention policies.
 - Add backup and restore drills for store roots, objects, refs, and keys.

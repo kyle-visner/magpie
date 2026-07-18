@@ -9,6 +9,9 @@ const (
 	ErrPermission ErrorCode = "permission_denied"
 	ErrNotFound   ErrorCode = "not_found"
 	ErrConflict   ErrorCode = "conflict"
+	ErrIntegrity  ErrorCode = "integrity_error"
+	ErrCapacity   ErrorCode = "capacity_exceeded"
+	ErrInternal   ErrorCode = "internal_error"
 )
 
 type AppError struct {

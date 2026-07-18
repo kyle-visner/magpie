@@ -63,7 +63,7 @@ func (s *Store) SetAccountingBasis(ctx Context, basis AccountingBasis) (BookSett
 	settings.ModifiedCashPolicy = DefaultModifiedCashPolicy()
 	settings.UpdatedAt = s.now().UTC()
 	settings.UpdatedBy = ctx.Actor
-	hash, err := s.appendEvent(ctx, "book.settings", "book:settings", "book settings set", wrapEvent("settings.update", settingsUpdatePayload{Settings: settings}), true)
+	hash, err := s.appendEventAt(ctx, "book.settings", "book:settings", "book settings set", wrapEvent("settings.update", settingsUpdatePayload{Settings: settings}), st.Root)
 	return settings, hash, err
 }
 

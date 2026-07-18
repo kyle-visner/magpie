@@ -5,8 +5,31 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestCLISelectsHostedJaybaseFromEnvironment(t *testing.T) {
+	t.Setenv("JAYBASE_URL", "https://jaybase.example.com")
+	t.Setenv("JAYBASE_TOKEN", "")
+
+	var out bytes.Buffer
+	err := run([]string{"init"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "JAYBASE_TOKEN is required") {
+		t.Fatalf("expected hosted mode to require its bearer token, got %v", err)
+	}
+}
+
+func TestCLIRejectsLocalAndHostedStoresTogether(t *testing.T) {
+	t.Setenv("JAYBASE_URL", "https://jaybase.example.com")
+	t.Setenv("JAYBASE_TOKEN", "writer-token")
+
+	var out bytes.Buffer
+	err := run([]string{"--store", t.TempDir(), "init"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected conflicting storage modes to fail, got %v", err)
+	}
+}
 
 func TestCLIInitializesStoreAndDeniesUnauthorizedLedgerRead(t *testing.T) {
 	dir := t.TempDir()

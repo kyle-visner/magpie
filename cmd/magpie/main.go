@@ -27,6 +27,7 @@ func run(args []string, out io.Writer) error {
 	global := flag.NewFlagSet("magpie", flag.ContinueOnError)
 	global.SetOutput(io.Discard)
 	storeDir := global.String("store", ".magpie", "store directory")
+	jaybaseURL := global.String("jaybase-url", os.Getenv("JAYBASE_URL"), "hosted Jaybase HTTPS origin; defaults to JAYBASE_URL")
 	actor := global.String("actor", "owner", "authenticated actor id")
 	role := global.String("role", "", "role to assume; defaults to the actor's configured role")
 	if err := global.Parse(args); err != nil {
@@ -39,10 +40,26 @@ func run(args []string, out io.Writer) error {
 	if rest[0] == "help" || rest[0] == "--help" || rest[0] == "-h" {
 		return usage(out)
 	}
-	store, err := magpie.OpenStore(*storeDir)
+	storeExplicit := false
+	global.Visit(func(f *flag.Flag) {
+		if f.Name == "store" {
+			storeExplicit = true
+		}
+	})
+	if strings.TrimSpace(*jaybaseURL) != "" && storeExplicit {
+		return fmt.Errorf("--store and --jaybase-url/JAYBASE_URL are mutually exclusive")
+	}
+	var store *magpie.Store
+	var err error
+	if strings.TrimSpace(*jaybaseURL) != "" {
+		store, err = magpie.OpenRemoteStore(*jaybaseURL, os.Getenv("JAYBASE_TOKEN"))
+	} else {
+		store, err = magpie.OpenStore(*storeDir)
+	}
 	if err != nil {
 		return err
 	}
+	defer store.Close()
 	a := app{store: store, ctx: magpie.Context{Actor: *actor, Role: *role}}
 	switch rest[0] {
 	case "init":
@@ -697,6 +714,7 @@ Commands:
 
 Global flags:
   --store DIR
+  --jaybase-url HTTPS_ORIGIN (or JAYBASE_URL; token from JAYBASE_TOKEN)
   --actor USER_ID
   --role ROLE`)
 	return err
