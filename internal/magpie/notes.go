@@ -35,7 +35,7 @@ func (s *Store) UpsertNote(ctx Context, id, title, body, sensitivity string) (No
 		note.CreatedAt = now
 		note.CreatedBy = ctx.Actor
 	}
-	hash, err := s.appendEvent(ctx, "note", id, "note upsert", wrapEvent("note.upsert", noteUpsertPayload{Note: note}), true)
+	hash, err := s.appendEventAt(ctx, "note", id, "note upsert", wrapEvent("note.upsert", noteUpsertPayload{Note: note}), st.Root)
 	return note, hash, err
 }
 

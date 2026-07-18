@@ -106,7 +106,7 @@ func (s *Store) CreateAccountWithDetails(ctx Context, account Account) (Account,
 	}
 	now := s.now().UTC()
 	acct := Account{ID: id, Number: number, Name: account.Name, Type: account.Type, Role: role, Sensitivity: account.Sensitivity, ExternalRefs: externalRefs, CreatedAt: now, CreatedBy: ctx.Actor}
-	hash, err := s.appendEvent(ctx, "ledger.account", id, "ledger account create", wrapEvent("account.create", accountCreatePayload{Account: acct}), true)
+	hash, err := s.appendEventAt(ctx, "ledger.account", id, "ledger account create", wrapEvent("account.create", accountCreatePayload{Account: acct}), st.Root)
 	return acct, hash, err
 }
 
@@ -137,7 +137,7 @@ func (s *Store) SetAccountNumber(ctx Context, accountID string, number string) (
 		return Account{}, "", err
 	}
 	account.Number = normalized
-	hash, err := s.appendEvent(ctx, "ledger.account", account.ID, "ledger account number set", wrapEvent("account.update", accountUpdatePayload{Account: account}), true)
+	hash, err := s.appendEventAt(ctx, "ledger.account", account.ID, "ledger account number set", wrapEvent("account.update", accountUpdatePayload{Account: account}), st.Root)
 	return account, hash, err
 }
 
@@ -174,7 +174,7 @@ func (s *Store) SetAccountRole(ctx Context, accountID string, role AccountRole) 
 		return Account{}, "", err
 	}
 	account.Role = normalized
-	hash, err := s.appendEvent(ctx, "ledger.account", account.ID, "ledger account role set", wrapEvent("account.update", accountUpdatePayload{Account: account}), true)
+	hash, err := s.appendEventAt(ctx, "ledger.account", account.ID, "ledger account role set", wrapEvent("account.update", accountUpdatePayload{Account: account}), st.Root)
 	return account, hash, err
 }
 
@@ -251,7 +251,7 @@ func (s *Store) setAccountExternalRef(ctx Context, accountID string, ref Externa
 		refs = append(refs, normalized)
 	}
 	account.ExternalRefs = refs
-	hash, err := s.appendEvent(ctx, "ledger.account", account.ID, "ledger account external-ref set", wrapEvent("account.update", accountUpdatePayload{Account: account}), true)
+	hash, err := s.appendEventAt(ctx, "ledger.account", account.ID, "ledger account external-ref set", wrapEvent("account.update", accountUpdatePayload{Account: account}), st.Root)
 	return account, hash, err
 }
 
@@ -550,7 +550,7 @@ func (s *Store) createWorkflowJournalEntry(ctx Context, req workflowJournalReque
 	}
 	entry.CreatedAt = s.now().UTC()
 	entry.CreatedBy = ctx.Actor
-	hash, err := s.appendEvent(ctx, "ledger.journal", entry.ID, "workflow journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), true)
+	hash, err := s.appendEventAt(ctx, "ledger.journal", entry.ID, "workflow journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), st.Root)
 	return entry, hash, err
 }
 
@@ -654,7 +654,7 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 	entry.GeneratedBy = ctx.Actor
 	entry.CreatedAt = s.now().UTC()
 	entry.CreatedBy = ctx.Actor
-	hash, err := s.appendEvent(ctx, "ledger.journal", entry.ID, "ledger journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), true)
+	hash, err := s.appendEventAt(ctx, "ledger.journal", entry.ID, "ledger journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), st.Root)
 	return entry, hash, err
 }
 

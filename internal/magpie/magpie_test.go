@@ -14,6 +14,11 @@ func newTestStore(t *testing.T) (*Store, Context) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	s.now = func() time.Time { return time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC) }
 	ctx := Context{Actor: "owner"}
 	if _, err := s.WriteInitialRoot(ctx); err != nil {
@@ -1626,8 +1631,8 @@ func TestMerkleNodeTamperingIsDetected(t *testing.T) {
 		t.Fatal("expected tampered node to fail integrity verification")
 	} else {
 		var app *AppError
-		if !errors.As(err, &app) || app.Code != ErrValidation {
-			t.Fatalf("expected integrity validation error, got %#v", err)
+		if !errors.As(err, &app) || app.Code != ErrIntegrity {
+			t.Fatalf("expected integrity error, got %#v", err)
 		}
 	}
 }
