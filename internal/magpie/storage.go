@@ -25,7 +25,8 @@ type storageBackend interface {
 	NodesFromRoot(string) ([]jaybase.Node, error)
 	AuditLog() ([]jaybase.Node, error)
 	NodePayload(jaybase.Node) ([]byte, error)
-	WriteNamedRef(string, string) error
+	NamedRef(string) (string, error)
+	WriteNamedRefAt(string, string, string) error
 	NodePath(string) string
 }
 
@@ -88,8 +89,12 @@ func (b *localStorageBackend) NodePayload(node jaybase.Node) ([]byte, error) {
 	return b.store.NodePayload(node)
 }
 
-func (b *localStorageBackend) WriteNamedRef(name, root string) error {
-	return b.store.WriteNamedRef(name, root)
+func (b *localStorageBackend) NamedRef(name string) (string, error) {
+	return b.store.NamedRef(name)
+}
+
+func (b *localStorageBackend) WriteNamedRefAt(name, root, expectedRoot string) error {
+	return b.store.WriteNamedRefAt(name, root, expectedRoot)
 }
 
 func (b *localStorageBackend) NodePath(hash string) string {
@@ -112,6 +117,32 @@ func (s *Store) nodePath(hash string) string {
 	return s.db.NodePath(hash)
 }
 
+// writeNamedRef gives local and hosted backends the same compare-and-swap
+// behavior. A failed write is reconciled against the durable value so a lost
+// success response or a concurrent writer choosing the same root is idempotent.
+func (s *Store) writeNamedRef(name, root string) error {
+	expectedRoot, err := s.db.NamedRef(name)
+	if err != nil {
+		var dbErr *jaybase.AppError
+		if !errors.As(err, &dbErr) || dbErr.Code != jaybase.ErrNotFound {
+			return storageError(err)
+		}
+		expectedRoot = ""
+	} else if expectedRoot == root {
+		return nil
+	}
+
+	if err := s.db.WriteNamedRefAt(name, root, expectedRoot); err != nil {
+		writeErr := storageError(err)
+		current, readErr := s.db.NamedRef(name)
+		if readErr == nil && current == root {
+			return nil
+		}
+		return writeErr
+	}
+	return nil
+}
+
 func (s *Store) WriteInitialRoot(ctx Context) (string, error) {
 	root, err := s.currentRoot()
 	if err != nil {
@@ -121,7 +152,19 @@ func (s *Store) WriteInitialRoot(ctx Context) (string, error) {
 		return root, nil
 	}
 	event := initEvent()
-	return s.appendEventAt(ctx, "store.init", "", "store init", event, root)
+	root, err = s.appendEventAt(ctx, "store.init", "", "store init", event, root)
+	if err == nil {
+		return root, nil
+	}
+	var appError *AppError
+	if !errors.As(err, &appError) || appError.Code != ErrConflict {
+		return "", err
+	}
+	current, currentErr := s.currentRoot()
+	if currentErr == nil && current != "" {
+		return current, nil
+	}
+	return "", err
 }
 
 func (s *Store) appendEvent(ctx Context, typ, entityID, command string, payload any, skipRootCheck bool) (string, error) {

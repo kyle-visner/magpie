@@ -2,7 +2,9 @@ package magpie
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,6 +24,7 @@ type hostedJaybaseStub struct {
 	namedRefs     map[string]string
 	idempotency   map[string]string
 	authFailures  int
+	refPUTs       int
 	expectedRoots []string
 	advanceReplay bool
 }
@@ -72,6 +75,7 @@ func (s *hostedJaybaseStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		name, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/v1/refs/"))
 		s.mu.Lock()
+		s.refPUTs++
 		current := s.namedRefs[name]
 		if request.ExpectedRoot == nil || *request.ExpectedRoot != current {
 			s.mu.Unlock()
@@ -167,6 +171,30 @@ func writeStubJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+type loseFirstRefPUTResponseTransport struct {
+	base http.RoundTripper
+	lost atomic.Bool
+}
+
+func (t *loseFirstRefPUTResponseTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(request)
+	if err != nil {
+		return nil, err
+	}
+	if request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/v1/refs/") && t.lost.CompareAndSwap(false, true) {
+		_, copyErr := io.Copy(io.Discard, response.Body)
+		closeErr := response.Body.Close()
+		if copyErr != nil {
+			return nil, copyErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		return nil, errors.New("simulated lost named-ref response")
+	}
+	return response, nil
+}
+
 func TestRemoteStoreUsesHostedJaybaseContract(t *testing.T) {
 	stub := newHostedJaybaseStub()
 	server := httptest.NewServer(stub)
@@ -223,6 +251,124 @@ func TestRemoteStoreUsesHostedJaybaseContract(t *testing.T) {
 	}
 	if stub.namedRefs["before-close"] != updatedRoot {
 		t.Fatalf("named ref was not written through the hosted API: %#v", stub.namedRefs)
+	}
+}
+
+func TestRemoteNamedRefReconcilesLostSuccessResponse(t *testing.T) {
+	stub := newHostedJaybaseStub()
+	server := httptest.NewServer(stub)
+	defer server.Close()
+
+	client := server.Client()
+	loss := &loseFirstRefPUTResponseTransport{base: client.Transport}
+	client.Transport = loss
+	store, err := openRemoteStore(server.URL, "writer-token", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	root, err := store.WriteInitialRoot(Context{Actor: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.CreateSnapshot(Context{Actor: "owner"}, "lost-response")
+	if err != nil {
+		t.Fatalf("snapshot should reconcile the durable ref after a lost response: %v", err)
+	}
+	if snapshot.Root != root || !loss.lost.Load() {
+		t.Fatalf("unexpected reconciled snapshot: %#v, response lost=%t", snapshot, loss.lost.Load())
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.refPUTs != 1 || stub.namedRefs[snapshot.Name] != root {
+		t.Fatalf("named ref PUT was retried or not persisted: puts=%d refs=%#v", stub.refPUTs, stub.namedRefs)
+	}
+}
+
+func TestRemoteConcurrentSameRootSnapshotsAreIdempotent(t *testing.T) {
+	stub := newHostedJaybaseStub()
+	server := httptest.NewServer(stub)
+	defer server.Close()
+
+	stores := make([]*Store, 2)
+	for i := range stores {
+		store, err := openRemoteStore(server.URL, "writer-token", server.Client())
+		if err != nil {
+			t.Fatal(err)
+		}
+		stores[i] = store
+		defer store.Close()
+	}
+	root, err := stores[0].WriteInitialRoot(Context{Actor: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, len(stores))
+	for _, store := range stores {
+		go func(store *Store) {
+			<-start
+			_, err := store.CreateSnapshot(Context{Actor: "owner"}, "concurrent")
+			results <- err
+		}(store)
+	}
+	close(start)
+	for range stores {
+		if err := <-results; err != nil {
+			t.Fatalf("same-root concurrent snapshot should succeed: %v", err)
+		}
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.namedRefs["concurrent"] != root {
+		t.Fatalf("concurrent named ref = %q, want %q", stub.namedRefs["concurrent"], root)
+	}
+}
+
+func TestRemoteInitialRootReconcilesConcurrentWinner(t *testing.T) {
+	const winner = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var initialized atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/root":
+			root := ""
+			if initialized.Load() {
+				root = winner
+			}
+			writeStubJSON(w, http.StatusOK, map[string]string{"root": root})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/events":
+			initialized.Store(true)
+			writeStubJSON(w, http.StatusConflict, map[string]any{
+				"error": map[string]string{"code": "conflict", "message": "root changed"},
+			})
+		default:
+			writeStubJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "not found"}})
+		}
+	}))
+	defer server.Close()
+
+	store, err := openRemoteStore(server.URL, "writer-token", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.WriteInitialRoot(Context{Actor: "owner"})
+	if err != nil {
+		t.Fatalf("initialization should accept the concurrent winner: %v", err)
+	}
+	if root != winner {
+		t.Fatalf("initial root = %q, want concurrent winner %q", root, winner)
+	}
+}
+
+func TestRemoteStoreNilClientKeepsRedirectGuard(t *testing.T) {
+	store, err := openRemoteStore("http://localhost:1234", "writer-token", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := store.db.(*remoteStorageBackend)
+	if backend.client.CheckRedirect == nil || !errors.Is(backend.client.CheckRedirect(nil, nil), http.ErrUseLastResponse) {
+		t.Fatal("default remote client must reject redirects")
 	}
 }
 

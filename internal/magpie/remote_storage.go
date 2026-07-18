@@ -39,12 +39,16 @@ type remoteEventPage struct {
 // token is deliberately supplied separately from the URL so it never appears
 // in request paths or persisted store data.
 func OpenRemoteStore(rawURL, token string) (*Store, error) {
-	return openRemoteStore(rawURL, token, &http.Client{
+	return openRemoteStore(rawURL, token, defaultRemoteHTTPClient())
+}
+
+func defaultRemoteHTTPClient() *http.Client {
+	return &http.Client{
 		Timeout: 30 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
-	})
+	}
 }
 
 func openRemoteStore(rawURL, token string, client *http.Client) (*Store, error) {
@@ -57,7 +61,7 @@ func openRemoteStore(rawURL, token string, client *http.Client) (*Store, error) 
 		return nil, appErr(ErrValidation, "JAYBASE_TOKEN is required when JAYBASE_URL is configured")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = defaultRemoteHTTPClient()
 	}
 	return newStore(&remoteStorageBackend{baseURL: baseURL, token: token, client: client}), nil
 }
@@ -186,20 +190,19 @@ func (b *remoteStorageBackend) NodePayload(node jaybase.Node) ([]byte, error) {
 	return append([]byte(nil), node.Payload...), nil
 }
 
-func (b *remoteStorageBackend) WriteNamedRef(name, root string) error {
-	expectedRoot := ""
+func (b *remoteStorageBackend) NamedRef(name string) (string, error) {
 	var current struct {
 		Root string `json:"root"`
 	}
 	path := "/v1/refs/" + url.PathEscape(name)
 	if err := b.doJSON(http.MethodGet, path, nil, "", &current); err != nil {
-		var appError *jaybase.AppError
-		if !errors.As(err, &appError) || appError.Code != jaybase.ErrNotFound {
-			return err
-		}
-	} else {
-		expectedRoot = current.Root
+		return "", err
 	}
+	return current.Root, nil
+}
+
+func (b *remoteStorageBackend) WriteNamedRefAt(name, root, expectedRoot string) error {
+	path := "/v1/refs/" + url.PathEscape(name)
 	body, err := json.Marshal(map[string]string{"root": root, "expected_root": expectedRoot})
 	if err != nil {
 		return err
@@ -212,6 +215,7 @@ func (b *remoteStorageBackend) NodePath(string) string {
 }
 
 func (b *remoteStorageBackend) doJSON(method, path string, body []byte, idempotencyKey string, result any) error {
+	retryRequest := method == http.MethodGet || method == http.MethodHead || idempotencyKey != ""
 	for attempt := 0; attempt < 3; attempt++ {
 		var requestBody io.Reader
 		if body != nil {
@@ -232,7 +236,7 @@ func (b *remoteStorageBackend) doJSON(method, path string, body []byte, idempote
 
 		response, err := b.client.Do(request)
 		if err != nil {
-			if attempt < 2 {
+			if retryRequest && attempt < 2 {
 				time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 				continue
 			}
@@ -248,7 +252,7 @@ func (b *remoteStorageBackend) doJSON(method, path string, body []byte, idempote
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			remoteError := decodeRemoteError(response.StatusCode, data)
-			if attempt < 2 && retryableRemoteError(response.StatusCode, remoteError) {
+			if retryRequest && attempt < 2 && retryableRemoteError(response.StatusCode, remoteError) {
 				time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 				continue
 			}

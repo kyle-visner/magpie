@@ -22,8 +22,8 @@ func (s *Store) CreateSnapshot(ctx Context, name string) (Snapshot, error) {
 	if st.Root == "" {
 		return Snapshot{}, appErr(ErrValidation, "cannot snapshot an empty store")
 	}
-	if err := s.db.WriteNamedRef(name, st.Root); err != nil {
-		return Snapshot{}, storageError(err)
+	if err := s.writeNamedRef(name, st.Root); err != nil {
+		return Snapshot{}, err
 	}
 	return Snapshot{Name: name, Root: st.Root}, nil
 }

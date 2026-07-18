@@ -849,6 +849,12 @@ read or mount the server's data volume, refs, or encryption key. Jaybase owns
 transport authentication, concurrent append serialization, encryption at rest,
 and hosted snapshots/backups.
 
+Each hosted command currently reconstructs state by fetching and decrypting the
+complete event history. This keeps local and hosted behavior identical, but its
+latency, bandwidth, and server work grow linearly with history size. Large or
+high-frequency ledgers will need incremental state caching, compaction, or a
+server-side materialized-state endpoint before this backend scales efficiently.
+
 In local mode, the default store directory is `.magpie/`:
 
 - `.magpie/objects/nodes/`: immutable JSON node files.

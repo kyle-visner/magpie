@@ -1668,6 +1668,25 @@ func TestSnapshotsArePermissionedNamedRoots(t *testing.T) {
 	if snap.Root == "" || snap.Name != "fy2026-close" {
 		t.Fatalf("unexpected snapshot: %#v", snap)
 	}
+	_, updatedRoot, err := s.UpsertNote(owner, "", "Close note", "updated after first snapshot", "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := s.CreateSnapshot(owner, "fy2026-close")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Root != updatedRoot || updated.Root == snap.Root {
+		t.Fatalf("local named ref did not update conditionally: first=%q updated=%q", snap.Root, updated.Root)
+	}
+	if err := storageError(s.db.WriteNamedRefAt("fy2026-close", snap.Root, "")); err == nil {
+		t.Fatal("expected stale local named-ref update to conflict")
+	} else {
+		var app *AppError
+		if !errors.As(err, &app) || app.Code != ErrConflict {
+			t.Fatalf("expected local named-ref conflict, got %T %v", err, err)
+		}
+	}
 	if _, err := s.CreateSnapshot(Context{Actor: "sales"}, "sales-savepoint"); err == nil {
 		t.Fatal("expected Sales Rep snapshot creation to be denied")
 	}
