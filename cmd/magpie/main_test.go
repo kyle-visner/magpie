@@ -31,6 +31,17 @@ func TestCLIRejectsLocalAndHostedStoresTogether(t *testing.T) {
 	}
 }
 
+func TestCLIRejectsHostedCacheWithLocalStore(t *testing.T) {
+	t.Setenv("JAYBASE_URL", "")
+	t.Setenv("MAGPIE_CACHE_DIR", "")
+
+	var out bytes.Buffer
+	err := run([]string{"--cache-dir", t.TempDir(), "init"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "only valid with hosted Jaybase") {
+		t.Fatalf("expected hosted cache with local storage to fail, got %v", err)
+	}
+}
+
 func TestCLIInitializesStoreAndDeniesUnauthorizedLedgerRead(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer

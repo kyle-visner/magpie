@@ -56,7 +56,7 @@ func TestRemoteStoreAgainstMergedJaybaseServer(t *testing.T) {
 	httpServer := httptest.NewServer(api.Handler())
 	t.Cleanup(httpServer.Close)
 
-	store, err := openRemoteStore(httpServer.URL, token, httpServer.Client())
+	store, err := openRemoteStore(httpServer.URL, token, httpServer.Client(), RemoteStoreOptions{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

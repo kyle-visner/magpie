@@ -28,6 +28,7 @@ func run(args []string, out io.Writer) error {
 	global.SetOutput(io.Discard)
 	storeDir := global.String("store", ".magpie", "store directory")
 	jaybaseURL := global.String("jaybase-url", os.Getenv("JAYBASE_URL"), "hosted Jaybase HTTPS origin; defaults to JAYBASE_URL")
+	cacheDir := global.String("cache-dir", os.Getenv("MAGPIE_CACHE_DIR"), "private directory for an encrypted hosted-state checkpoint; defaults to MAGPIE_CACHE_DIR")
 	actor := global.String("actor", "owner", "authenticated actor id")
 	role := global.String("role", "", "role to assume; defaults to the actor's configured role")
 	if err := global.Parse(args); err != nil {
@@ -49,10 +50,13 @@ func run(args []string, out io.Writer) error {
 	if strings.TrimSpace(*jaybaseURL) != "" && storeExplicit {
 		return fmt.Errorf("--store and --jaybase-url/JAYBASE_URL are mutually exclusive")
 	}
+	if strings.TrimSpace(*jaybaseURL) == "" && strings.TrimSpace(*cacheDir) != "" {
+		return fmt.Errorf("--cache-dir/MAGPIE_CACHE_DIR is only valid with hosted Jaybase")
+	}
 	var store *magpie.Store
 	var err error
 	if strings.TrimSpace(*jaybaseURL) != "" {
-		store, err = magpie.OpenRemoteStore(*jaybaseURL, os.Getenv("JAYBASE_TOKEN"))
+		store, err = magpie.OpenRemoteStoreWithOptions(*jaybaseURL, os.Getenv("JAYBASE_TOKEN"), magpie.RemoteStoreOptions{CacheDir: *cacheDir})
 	} else {
 		store, err = magpie.OpenStore(*storeDir)
 	}
@@ -715,6 +719,7 @@ Commands:
 Global flags:
   --store DIR
   --jaybase-url HTTPS_ORIGIN (or JAYBASE_URL; token from JAYBASE_TOKEN)
+  --cache-dir DIR (or MAGPIE_CACHE_DIR; hosted mode only)
   --actor USER_ID
   --role ROLE`)
 	return err

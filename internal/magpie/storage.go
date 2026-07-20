@@ -13,8 +13,9 @@ import (
 )
 
 type Store struct {
-	db  storageBackend
-	now func() time.Time
+	db         storageBackend
+	now        func() time.Time
+	stateCache stateCheckpointCache
 }
 
 type storageBackend interface {
@@ -28,6 +29,16 @@ type storageBackend interface {
 	NamedRef(string) (string, error)
 	WriteNamedRefAt(string, string, string) error
 	NodePath(string) string
+}
+
+type incrementalReplayBackend interface {
+	EventsAfter(string) ([]jaybase.Node, string, error)
+}
+
+type stateCheckpointCache interface {
+	Load() (State, bool, error)
+	Save(State) error
+	Invalidate() error
 }
 
 type localStorageBackend struct {
@@ -213,6 +224,9 @@ func (s *Store) AuditLog() ([]Node, error) {
 }
 
 func (s *Store) LoadState() (State, error) {
+	if s.stateCache != nil {
+		return s.loadStateFromCheckpoint()
+	}
 	root, err := s.currentRoot()
 	if err != nil {
 		return State{}, err
@@ -229,6 +243,56 @@ func (s *Store) LoadState() (State, error) {
 		st.Root = node.Hash
 	}
 	return st, nil
+}
+
+func (s *Store) loadStateFromCheckpoint() (State, error) {
+	replay, ok := s.db.(incrementalReplayBackend)
+	if !ok {
+		return State{}, appErr(ErrInternal, "state checkpoint configured for a backend without incremental replay")
+	}
+
+	st, found, err := s.stateCache.Load()
+	if err != nil {
+		return State{}, err
+	}
+	if !found {
+		st = emptyState()
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		checkpointRoot := st.Root
+		nodes, targetRoot, err := replay.EventsAfter(checkpointRoot)
+		if err != nil {
+			var dbErr *jaybase.AppError
+			if checkpointRoot != "" && errors.As(err, &dbErr) && dbErr.Code == jaybase.ErrNotFound {
+				if invalidateErr := s.stateCache.Invalidate(); invalidateErr != nil {
+					return State{}, invalidateErr
+				}
+				st = emptyState()
+				found = false
+				continue
+			}
+			return State{}, storageError(err)
+		}
+
+		for _, node := range nodes {
+			if err := s.applyNode(&st, node); err != nil {
+				return State{}, err
+			}
+			st.Root = node.Hash
+		}
+		if st.Root != targetRoot {
+			return State{}, appErr(ErrIntegrity, "Jaybase incremental replay ended at %q instead of captured root %q", st.Root, targetRoot)
+		}
+		if !found || len(nodes) > 0 {
+			if err := s.stateCache.Save(st); err != nil {
+				return State{}, err
+			}
+		}
+		return st, nil
+	}
+
+	return State{}, appErr(ErrNotFound, "cached Jaybase root was not found after a cold replay")
 }
 
 func (s *Store) applyNode(st *State, node Node) error {

@@ -35,11 +35,23 @@ type remoteEventPage struct {
 	HasMore bool           `json:"has_more"`
 }
 
+type RemoteStoreOptions struct {
+	// CacheDir enables a persistent encrypted state checkpoint for incremental
+	// hosted replay. An empty directory leaves the current cold-replay behavior.
+	CacheDir string
+}
+
 // OpenRemoteStore connects Magpie to a hosted Jaybase HTTP API. The bearer
 // token is deliberately supplied separately from the URL so it never appears
 // in request paths or persisted store data.
 func OpenRemoteStore(rawURL, token string) (*Store, error) {
 	return openRemoteStore(rawURL, token, defaultRemoteHTTPClient())
+}
+
+// OpenRemoteStoreWithOptions connects to hosted Jaybase with optional
+// client-side state checkpointing.
+func OpenRemoteStoreWithOptions(rawURL, token string, options RemoteStoreOptions) (*Store, error) {
+	return openRemoteStore(rawURL, token, defaultRemoteHTTPClient(), options)
 }
 
 func defaultRemoteHTTPClient() *http.Client {
@@ -51,7 +63,7 @@ func defaultRemoteHTTPClient() *http.Client {
 	}
 }
 
-func openRemoteStore(rawURL, token string, client *http.Client) (*Store, error) {
+func openRemoteStore(rawURL, token string, client *http.Client, optionList ...RemoteStoreOptions) (*Store, error) {
 	baseURL, err := normalizeJaybaseURL(rawURL)
 	if err != nil {
 		return nil, err
@@ -63,7 +75,21 @@ func openRemoteStore(rawURL, token string, client *http.Client) (*Store, error) 
 	if client == nil {
 		client = defaultRemoteHTTPClient()
 	}
-	return newStore(&remoteStorageBackend{baseURL: baseURL, token: token, client: client}), nil
+	store := newStore(&remoteStorageBackend{baseURL: baseURL, token: token, client: client})
+	if len(optionList) > 1 {
+		return nil, appErr(ErrValidation, "only one RemoteStoreOptions value may be supplied")
+	}
+	if len(optionList) == 1 {
+		cacheDir := strings.TrimSpace(optionList[0].CacheDir)
+		if cacheDir != "" {
+			cache, err := newHostedStateCache(cacheDir, baseURL, token)
+			if err != nil {
+				return nil, err
+			}
+			store.stateCache = cache
+		}
+	}
+	return store, nil
 }
 
 func normalizeJaybaseURL(raw string) (string, error) {
@@ -152,19 +178,68 @@ func (b *remoteStorageBackend) AuditLog() ([]jaybase.Node, error) {
 	return nodes, err
 }
 
+// EventsAfter follows Jaybase's stable replay-boundary contract: capture the
+// first page's root, then stop exactly at that event even when concurrent
+// appends make later pages report a newer live root.
+func (b *remoteStorageBackend) EventsAfter(checkpointRoot string) ([]jaybase.Node, string, error) {
+	nodes := make([]jaybase.Node, 0)
+	after := checkpointRoot
+	targetRoot := ""
+	firstPage := true
+	for {
+		page, err := b.eventPage(after, true)
+		if err != nil {
+			return nil, "", err
+		}
+		if firstPage {
+			targetRoot = page.Root
+			firstPage = false
+			if len(page.Events) == 0 {
+				if targetRoot != checkpointRoot {
+					return nil, "", appErr(ErrIntegrity, "Jaybase returned an empty incremental page at %q with target root %q", checkpointRoot, targetRoot)
+				}
+				return nodes, targetRoot, nil
+			}
+		}
+
+		for _, node := range page.Events {
+			if err := validateIncrementalLink(after, node); err != nil {
+				return nil, "", err
+			}
+			nodes = append(nodes, node)
+			after = node.Hash
+			if node.Hash == targetRoot {
+				return nodes, targetRoot, nil
+			}
+		}
+		if len(page.Events) == 0 {
+			return nil, "", appErr(ErrIntegrity, "Jaybase returned an empty page before captured root %q", targetRoot)
+		}
+		if !page.HasMore {
+			return nil, "", appErr(ErrIntegrity, "Jaybase incremental replay ended before captured root %q", targetRoot)
+		}
+	}
+}
+
+func validateIncrementalLink(after string, node jaybase.Node) error {
+	if after == "" {
+		if len(node.Parents) != 0 {
+			return appErr(ErrIntegrity, "Jaybase cold replay began with non-genesis event %s", node.Hash)
+		}
+		return nil
+	}
+	if len(node.Parents) != 1 || node.Parents[0] != after {
+		return appErr(ErrIntegrity, "Jaybase incremental event %s does not follow checkpoint %s", node.Hash, after)
+	}
+	return nil
+}
+
 func (b *remoteStorageBackend) readEvents(stopAt string, includePayload bool) ([]jaybase.Node, bool, error) {
 	nodes := make([]jaybase.Node, 0)
 	after := ""
 	for {
-		query := url.Values{"limit": {strconv.Itoa(remoteEventPageSize)}}
-		if includePayload {
-			query.Set("include_payload", "true")
-		}
-		if after != "" {
-			query.Set("after", after)
-		}
-		var page remoteEventPage
-		if err := b.doJSON(http.MethodGet, "/v1/events?"+query.Encode(), nil, "", &page); err != nil {
+		page, err := b.eventPage(after, includePayload)
+		if err != nil {
 			return nil, false, err
 		}
 		for _, node := range page.Events {
@@ -181,6 +256,21 @@ func (b *remoteStorageBackend) readEvents(stopAt string, includePayload bool) ([
 		}
 		after = page.Events[len(page.Events)-1].Hash
 	}
+}
+
+func (b *remoteStorageBackend) eventPage(after string, includePayload bool) (remoteEventPage, error) {
+	query := url.Values{"limit": {strconv.Itoa(remoteEventPageSize)}}
+	if includePayload {
+		query.Set("include_payload", "true")
+	}
+	if after != "" {
+		query.Set("after", after)
+	}
+	var page remoteEventPage
+	if err := b.doJSON(http.MethodGet, "/v1/events?"+query.Encode(), nil, "", &page); err != nil {
+		return remoteEventPage{}, err
+	}
+	return page, nil
 }
 
 func (b *remoteStorageBackend) NodePayload(node jaybase.Node) ([]byte, error) {

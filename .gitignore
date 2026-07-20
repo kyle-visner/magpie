@@ -1,6 +1,7 @@
 .infobase/
 /magpie
 .magpie/
+.magpie-cache/
 /infobase
 *.test
 coverage.out

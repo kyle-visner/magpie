@@ -85,6 +85,7 @@ or idempotency key:
 ```sh
 export JAYBASE_URL=https://jaybase.example.com
 export JAYBASE_TOKEN='writer-token-from-the-secret-manager'
+export MAGPIE_CACHE_DIR="$PWD/.magpie-cache"
 
 ./magpie \
   --actor AGENT_USER_ID \
@@ -95,7 +96,10 @@ export JAYBASE_TOKEN='writer-token-from-the-secret-manager'
 `JAYBASE_TOKEN`. Hosted requests fetch decrypted payloads only when replaying
 state; audit output remains metadata-only. Writes use Jaybase's `expected_root`
 and `Idempotency-Key` contract and return a conflict instead of overwriting a
-newer root.
+newer root. `MAGPIE_CACHE_DIR` is optional; when configured, Magpie creates a
+private subdirectory containing an encrypted materialized-state checkpoint for
+incremental replay. Do not share one cache directory between mutually untrusted
+users.
 
 For development without building first, use:
 
@@ -835,6 +839,7 @@ Global flags:
 ```text
 --store DIR        store directory, default .magpie
 --jaybase-url URL  hosted Jaybase HTTPS origin, default JAYBASE_URL
+--cache-dir DIR    encrypted hosted-state cache, default MAGPIE_CACHE_DIR
 --actor USER_ID    caller identity, default owner
 --role ROLE        optional role assertion; must match the actor's assigned role
 ```
@@ -849,11 +854,20 @@ read or mount the server's data volume, refs, or encryption key. Jaybase owns
 transport authentication, concurrent append serialization, encryption at rest,
 and hosted snapshots/backups.
 
-Each hosted command currently reconstructs state by fetching and decrypting the
-complete event history. This keeps local and hosted behavior identical, but its
-latency, bandwidth, and server work grow linearly with history size. Large or
-high-frequency ledgers will need incremental state caching, compaction, or a
-server-side materialized-state endpoint before this backend scales efficiently.
+Without `--cache-dir` or `MAGPIE_CACHE_DIR`, each hosted command reconstructs
+state by fetching and decrypting the complete event history. With a cache,
+Magpie encrypts a versioned materialized-state checkpoint locally and asks
+Jaybase only for events after the last fully applied root. It captures the first
+page's root as a stable replay boundary and never applies concurrently appended
+events beyond it. A warm command therefore scales with the new event suffix;
+the first command, an invalidated checkpoint, and explicit audit output still
+scale with complete history.
+
+The checkpoint is a performance hint, not a source of truth. If Jaybase returns
+`404 not_found` for its cached root after a restore or store replacement,
+Magpie deletes the checkpoint and performs one cold replay. Appends still use
+the root produced by fully applying that bounded replay, preserving Jaybase's
+optimistic concurrency semantics.
 
 In local mode, the default store directory is `.magpie/`:
 
@@ -888,7 +902,12 @@ trusted automation or behind a wrapper that binds the authenticated caller to
 the permitted `--actor` value.
 
 Keep `JAYBASE_TOKEN` in a secret manager, grant the lowest hosted role needed,
-and never pass it on the command line. Local production deployments should
-provide `JAYBASE_DATA_KEY` from a managed secret store or KMS and keep local key
-files out of backups. Hosted deployments manage the data key and encrypted
-backups on the Jaybase server instead.
+and never pass it on the command line. Hosted state checkpoints contain a full
+materialized business projection, so Magpie encrypts them with AES-256-GCM
+under a key derived from the bearer token and hosted origin, writes them
+atomically with owner-only permissions, and separates caches by credential.
+Token rotation intentionally causes a cold cache miss; remove obsolete cache
+files according to the deployment's retention policy. Local production
+deployments should provide `JAYBASE_DATA_KEY` from a managed secret store or KMS
+and keep local key files out of backups. Hosted deployments manage the data key
+and encrypted backups on the Jaybase server instead.

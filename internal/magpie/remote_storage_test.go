@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,7 @@ type hostedJaybaseStub struct {
 	refPUTs       int
 	expectedRoots []string
 	advanceReplay bool
+	eventAfter    []string
 }
 
 func newHostedJaybaseStub() *hostedJaybaseStub {
@@ -138,12 +140,20 @@ func (s *hostedJaybaseStub) eventsResponse(w http.ResponseWriter, r *http.Reques
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	start := 0
-	if after := r.URL.Query().Get("after"); after != "" {
+	after := r.URL.Query().Get("after")
+	s.eventAfter = append(s.eventAfter, after)
+	if after != "" {
+		found := false
 		for i, event := range s.events {
 			if event.Hash == after {
 				start = i + 1
+				found = true
 				break
 			}
+		}
+		if !found {
+			writeStubJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "after root was not found in the current history"}})
+			return
 		}
 	}
 	end := start + 1 // Force pagination so the client cursor path is exercised.
@@ -162,6 +172,193 @@ func (s *hostedJaybaseStub) eventsResponse(w http.ResponseWriter, r *http.Reques
 	if s.advanceReplay {
 		s.root = fmt.Sprintf("sha256:%064x", len(s.events)+1000)
 		s.advanceReplay = false
+	}
+}
+
+func TestRemoteStateCacheReplaysOnlyTheNewSuffix(t *testing.T) {
+	stub := newHostedJaybaseStub()
+	server := httptest.NewServer(stub)
+	defer server.Close()
+	cacheDir := t.TempDir()
+	options := RemoteStoreOptions{CacheDir: cacheDir}
+
+	store, err := openRemoteStore(server.URL, "writer-token", server.Client(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.WriteInitialRoot(Context{Actor: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	note, noteRoot, err := store.UpsertNote(Context{Actor: "owner"}, "", "Cached note", "sensitive cached body", "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != noteRoot || state.Notes[note.ID].Body != note.Body {
+		t.Fatalf("unexpected primed cache state: %#v", state)
+	}
+	cache := store.stateCache.(*hostedStateCache)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(cache.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), note.Body) || strings.Contains(string(raw), "writer-token") {
+		t.Fatalf("state checkpoint exposed plaintext business data or credentials: %s", raw)
+	}
+	info, err := os.Stat(cache.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("state checkpoint mode = %o, want 600", info.Mode().Perm())
+	}
+
+	stub.mu.Lock()
+	stub.eventAfter = nil
+	stub.mu.Unlock()
+	warmStore, err := openRemoteStore(server.URL, "writer-token", server.Client(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer warmStore.Close()
+	warmState, err := warmStore.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warmState.Root != noteRoot || warmState.Notes[note.ID].Body != note.Body {
+		t.Fatalf("unexpected warm state: %#v", warmState)
+	}
+	stub.mu.Lock()
+	if len(stub.eventAfter) != 1 || stub.eventAfter[0] != noteRoot {
+		stub.mu.Unlock()
+		t.Fatalf("warm replay cursors = %#v, want only %q", stub.eventAfter, noteRoot)
+	}
+	stub.eventAfter = nil
+	stub.mu.Unlock()
+
+	updated := note
+	updated.Body = "suffix-only update"
+	updatedRoot, err := warmStore.appendEventAt(Context{Actor: "owner"}, "note", note.ID, "note upsert", wrapEvent("note.upsert", noteUpsertPayload{Note: updated}), noteRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedState, err := warmStore.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedState.Root != updatedRoot || updatedState.Notes[note.ID].Body != updated.Body {
+		t.Fatalf("suffix replay did not update cached state: %#v", updatedState)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.eventAfter) != 1 || stub.eventAfter[0] != noteRoot {
+		t.Fatalf("suffix replay cursors = %#v, want only %q", stub.eventAfter, noteRoot)
+	}
+}
+
+func TestRemoteStateCacheInvalidatesMissingCheckpointRoot(t *testing.T) {
+	stub := newHostedJaybaseStub()
+	server := httptest.NewServer(stub)
+	defer server.Close()
+	options := RemoteStoreOptions{CacheDir: t.TempDir()}
+
+	store, err := openRemoteStore(server.URL, "writer-token", server.Client(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.WriteInitialRoot(Context{Actor: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	_, oldRoot, err := store.UpsertNote(Context{Actor: "owner"}, "", "Old history", "old body", "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadState(); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+
+	replacementRoot := fmt.Sprintf("sha256:%064x", 9999)
+	replacementPayload, err := json.Marshal(initEvent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub.mu.Lock()
+	stub.events = []jaybase.Node{{Schema: 1, Hash: replacementRoot, Payload: replacementPayload}}
+	stub.root = replacementRoot
+	stub.eventAfter = nil
+	stub.mu.Unlock()
+
+	restoredStore, err := openRemoteStore(server.URL, "writer-token", server.Client(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restoredStore.Close()
+	state, err := restoredStore.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != replacementRoot || len(state.Notes) != 0 {
+		t.Fatalf("cold replay after checkpoint invalidation returned %#v", state)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.eventAfter) != 2 || stub.eventAfter[0] != oldRoot || stub.eventAfter[1] != "" {
+		t.Fatalf("checkpoint invalidation cursors = %#v, want [%q, cold]", stub.eventAfter, oldRoot)
+	}
+}
+
+func TestRemoteIncrementalReplayStopsAtFirstPageRoot(t *testing.T) {
+	const (
+		checkpoint = "sha256:checkpoint"
+		first      = "sha256:first"
+		target     = "sha256:target"
+		newer      = "sha256:newer"
+	)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		switch r.URL.Query().Get("after") {
+		case checkpoint:
+			writeStubJSON(w, http.StatusOK, remoteEventPage{
+				Events: []jaybase.Node{{Hash: first, Parents: []string{checkpoint}, Payload: json.RawMessage(`{"kind":"one"}`)}},
+				Root:   target, HasMore: true,
+			})
+		case first:
+			writeStubJSON(w, http.StatusOK, remoteEventPage{
+				Events: []jaybase.Node{
+					{Hash: target, Parents: []string{first}, Payload: json.RawMessage(`{"kind":"target"}`)},
+					{Hash: newer, Parents: []string{target}, Payload: json.RawMessage(`{"kind":"newer"}`)},
+				},
+				Root: newer, HasMore: false,
+			})
+		default:
+			writeStubJSON(w, http.StatusBadRequest, map[string]string{"unexpected_after": r.URL.Query().Get("after")})
+		}
+	}))
+	defer server.Close()
+
+	store, err := openRemoteStore(server.URL, "writer-token", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := store.db.(*remoteStorageBackend)
+	nodes, capturedRoot, err := backend.EventsAfter(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capturedRoot != target || len(nodes) != 2 || nodes[0].Hash != first || nodes[1].Hash != target {
+		t.Fatalf("bounded replay = root %q nodes %#v", capturedRoot, nodes)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("bounded replay requests = %d, want 2", calls.Load())
 	}
 }
 
