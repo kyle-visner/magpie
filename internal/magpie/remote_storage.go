@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	maxRemoteResponseBytes = 64 << 20
-	remoteEventPageSize    = 50
+	maxRemoteResponseBytes     = 64 << 20
+	remoteEventPageSize        = 50
+	maxIncrementalReplayPages  = 10_000
+	maxIncrementalReplayEvents = 500_000
 )
 
 type remoteStorageBackend struct {
@@ -182,11 +184,18 @@ func (b *remoteStorageBackend) AuditLog() ([]jaybase.Node, error) {
 // first page's root, then stop exactly at that event even when concurrent
 // appends make later pages report a newer live root.
 func (b *remoteStorageBackend) EventsAfter(checkpointRoot string) ([]jaybase.Node, string, error) {
+	return b.eventsAfter(checkpointRoot, maxIncrementalReplayPages, maxIncrementalReplayEvents)
+}
+
+func (b *remoteStorageBackend) eventsAfter(checkpointRoot string, maxPages, maxEvents int) ([]jaybase.Node, string, error) {
 	nodes := make([]jaybase.Node, 0)
 	after := checkpointRoot
 	targetRoot := ""
 	firstPage := true
-	for {
+	for pageNumber := 0; ; pageNumber++ {
+		if pageNumber >= maxPages {
+			return nil, "", appErr(ErrCapacity, "Jaybase incremental replay exceeded %d pages before captured root %q", maxPages, targetRoot)
+		}
 		page, err := b.eventPage(after, true)
 		if err != nil {
 			return nil, "", err
@@ -203,6 +212,9 @@ func (b *remoteStorageBackend) EventsAfter(checkpointRoot string) ([]jaybase.Nod
 		}
 
 		for _, node := range page.Events {
+			if len(nodes) >= maxEvents {
+				return nil, "", appErr(ErrCapacity, "Jaybase incremental replay exceeded %d events before captured root %q", maxEvents, targetRoot)
+			}
 			if err := validateIncrementalLink(after, node); err != nil {
 				return nil, "", err
 			}
@@ -229,7 +241,7 @@ func validateIncrementalLink(after string, node jaybase.Node) error {
 		return nil
 	}
 	if len(node.Parents) != 1 || node.Parents[0] != after {
-		return appErr(ErrIntegrity, "Jaybase incremental event %s does not follow checkpoint %s", node.Hash, after)
+		return appErr(ErrIntegrity, "Jaybase incremental event %s does not follow predecessor %s", node.Hash, after)
 	}
 	return nil
 }

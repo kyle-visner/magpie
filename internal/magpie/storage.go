@@ -259,6 +259,7 @@ func (s *Store) loadStateFromCheckpoint() (State, error) {
 		st = emptyState()
 	}
 
+replayAttempts:
 	for attempt := 0; attempt < 2; attempt++ {
 		checkpointRoot := st.Root
 		nodes, targetRoot, err := replay.EventsAfter(checkpointRoot)
@@ -277,17 +278,33 @@ func (s *Store) loadStateFromCheckpoint() (State, error) {
 
 		for _, node := range nodes {
 			if err := s.applyNode(&st, node); err != nil {
+				if found {
+					if invalidateErr := s.stateCache.Invalidate(); invalidateErr != nil {
+						return State{}, invalidateErr
+					}
+					st = emptyState()
+					found = false
+					continue replayAttempts
+				}
 				return State{}, err
 			}
 			st.Root = node.Hash
 		}
 		if st.Root != targetRoot {
+			if found {
+				if invalidateErr := s.stateCache.Invalidate(); invalidateErr != nil {
+					return State{}, invalidateErr
+				}
+				st = emptyState()
+				found = false
+				continue
+			}
 			return State{}, appErr(ErrIntegrity, "Jaybase incremental replay ended at %q instead of captured root %q", st.Root, targetRoot)
 		}
 		if !found || len(nodes) > 0 {
-			if err := s.stateCache.Save(st); err != nil {
-				return State{}, err
-			}
+			// The checkpoint is only a performance hint. A reconstructed state is
+			// still authoritative when local cache persistence is unavailable.
+			_ = s.stateCache.Save(st)
 		}
 		return st, nil
 	}

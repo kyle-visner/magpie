@@ -175,6 +175,20 @@ func (s *hostedJaybaseStub) eventsResponse(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+type failingStateCheckpointCache struct{}
+
+func (failingStateCheckpointCache) Load() (State, bool, error) {
+	return State{}, false, nil
+}
+
+func (failingStateCheckpointCache) Save(State) error {
+	return errors.New("simulated checkpoint persistence failure")
+}
+
+func (failingStateCheckpointCache) Invalidate() error {
+	return nil
+}
+
 func TestRemoteStateCacheReplaysOnlyTheNewSuffix(t *testing.T) {
 	stub := newHostedJaybaseStub()
 	server := httptest.NewServer(stub)
@@ -315,6 +329,83 @@ func TestRemoteStateCacheInvalidatesMissingCheckpointRoot(t *testing.T) {
 	}
 }
 
+func TestRemoteStateCacheColdReplaysAfterWarmApplyFailure(t *testing.T) {
+	stub := newHostedJaybaseStub()
+	server := httptest.NewServer(stub)
+	defer server.Close()
+
+	uncached, err := openRemoteStore(server.URL, "writer-token", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := uncached.WriteInitialRoot(Context{Actor: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	account, accountRoot, err := uncached.CreateAccount(Context{Actor: "owner"}, "Recovery account", AccountAsset, "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, updatedRoot, err := uncached.SetAccountNumber(Context{Actor: "owner"}, account.ID, "1000")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cacheDir := t.TempDir()
+	cache, err := newHostedStateCache(cacheDir, server.URL, "writer-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logicallyStale := emptyState()
+	logicallyStale.Root = accountRoot
+	if err := cache.Save(logicallyStale); err != nil {
+		t.Fatal(err)
+	}
+	stub.mu.Lock()
+	stub.eventAfter = nil
+	stub.mu.Unlock()
+
+	store, err := openRemoteStore(server.URL, "writer-token", server.Client(), RemoteStoreOptions{CacheDir: cacheDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != updatedRoot || state.Accounts[account.ID].Number != "1000" {
+		t.Fatalf("cold recovery returned %#v", state)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.eventAfter) < 2 || stub.eventAfter[0] != accountRoot || stub.eventAfter[1] != "" {
+		t.Fatalf("warm apply recovery cursors = %#v, want [%q, cold, ...]", stub.eventAfter, accountRoot)
+	}
+}
+
+func TestRemoteStateCacheSaveFailureDoesNotFailStateLoad(t *testing.T) {
+	stub := newHostedJaybaseStub()
+	server := httptest.NewServer(stub)
+	defer server.Close()
+
+	store, err := openRemoteStore(server.URL, "writer-token", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.WriteInitialRoot(Context{Actor: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.stateCache = failingStateCheckpointCache{}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatalf("checkpoint persistence failure blocked state load: %v", err)
+	}
+	if state.Root != root {
+		t.Fatalf("state root = %q, want %q", state.Root, root)
+	}
+}
+
 func TestRemoteIncrementalReplayStopsAtFirstPageRoot(t *testing.T) {
 	const (
 		checkpoint = "sha256:checkpoint"
@@ -359,6 +450,62 @@ func TestRemoteIncrementalReplayStopsAtFirstPageRoot(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("bounded replay requests = %d, want 2", calls.Load())
+	}
+}
+
+func TestRemoteIncrementalReplayBoundsPages(t *testing.T) {
+	const checkpoint = "sha256:checkpoint"
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		after := r.URL.Query().Get("after")
+		hash := fmt.Sprintf("sha256:event-%d", call)
+		writeStubJSON(w, http.StatusOK, remoteEventPage{
+			Events:  []jaybase.Node{{Hash: hash, Parents: []string{after}, Payload: json.RawMessage(`{"kind":"event"}`)}},
+			Root:    "sha256:unreachable-target",
+			HasMore: true,
+		})
+	}))
+	defer server.Close()
+
+	store, err := openRemoteStore(server.URL, "writer-token", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := store.db.(*remoteStorageBackend)
+	_, _, err = backend.eventsAfter(checkpoint, 2, 10)
+	var appError *AppError
+	if !errors.As(err, &appError) || appError.Code != ErrCapacity {
+		t.Fatalf("expected bounded replay capacity error, got %T %v", err, err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("bounded replay requests = %d, want 2", calls.Load())
+	}
+}
+
+func TestRemoteIncrementalReplayBoundsEvents(t *testing.T) {
+	const checkpoint = "sha256:checkpoint"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeStubJSON(w, http.StatusOK, remoteEventPage{
+			Events: []jaybase.Node{
+				{Hash: "sha256:first", Parents: []string{checkpoint}, Payload: json.RawMessage(`{"kind":"first"}`)},
+				{Hash: "sha256:second", Parents: []string{"sha256:first"}, Payload: json.RawMessage(`{"kind":"second"}`)},
+			},
+			Root:    "sha256:unreachable-target",
+			HasMore: true,
+		})
+	}))
+	defer server.Close()
+
+	store, err := openRemoteStore(server.URL, "writer-token", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := store.db.(*remoteStorageBackend)
+	_, _, err = backend.eventsAfter(checkpoint, 10, 1)
+	var appError *AppError
+	if !errors.As(err, &appError) || appError.Code != ErrCapacity {
+		t.Fatalf("expected bounded replay event-cap error, got %T %v", err, err)
 	}
 }
 

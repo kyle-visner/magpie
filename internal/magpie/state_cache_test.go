@@ -1,8 +1,10 @@
 package magpie
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -26,6 +28,44 @@ func TestHostedStateCacheInvalidatesCorruptCheckpoint(t *testing.T) {
 	}
 	if _, err := os.Stat(cache.path); !os.IsNotExist(err) {
 		t.Fatalf("corrupt checkpoint was not removed: %v", err)
+	}
+}
+
+func TestHostedStateCacheInvalidatesOldMaterialization(t *testing.T) {
+	cache, err := newHostedStateCache(t.TempDir(), "https://jaybase.example.com", "writer-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := emptyState()
+	state.Root = "sha256:old-materialization"
+	plaintext, err := json.Marshal(stateCheckpoint{
+		MaterializationVersion: hostedStateMaterializationVersion + 1,
+		State:                  state,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := cache.aead()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := make([]byte, aead.NonceSize())
+	raw, err := json.Marshal(encryptedStateCheckpoint{
+		Version:    hostedStateCacheEnvelopeVersion,
+		Nonce:      nonce,
+		Ciphertext: aead.Seal(nil, nonce, plaintext, cache.aad),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cache.path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := cache.Load(); err != nil || found {
+		t.Fatalf("old materialization load = found %t err %v", found, err)
+	}
+	if _, err := os.Stat(cache.path); !os.IsNotExist(err) {
+		t.Fatalf("old materialization checkpoint was not removed: %v", err)
 	}
 }
 
@@ -106,4 +146,45 @@ func TestHostedStateCacheRejectsWritableSharedBaseDirectory(t *testing.T) {
 	if _, err := newHostedStateCache(dir, "https://jaybase.example.com", "writer-token"); err == nil {
 		t.Fatal("expected writable shared cache base directory to be rejected")
 	}
+}
+
+func TestHostedStateCacheRejectsStickySharedBaseDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newHostedStateCache(dir, "https://jaybase.example.com", "writer-token"); err == nil {
+		t.Fatal("expected sticky shared cache base directory to be rejected")
+	}
+}
+
+func TestHostedStateCacheRejectsSymlinkedDirectories(t *testing.T) {
+	t.Run("base", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(root, "target")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(root, "cache-link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newHostedStateCache(link, "https://jaybase.example.com", "writer-token"); err == nil {
+			t.Fatal("expected symlinked cache base to be rejected")
+		}
+	})
+
+	t.Run("state", func(t *testing.T) {
+		base := t.TempDir()
+		target := filepath.Join(t.TempDir(), "target")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(base, "state")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newHostedStateCache(base, "https://jaybase.example.com", "writer-token"); err == nil {
+			t.Fatal("expected symlinked cache state directory to be rejected")
+		}
+	})
 }

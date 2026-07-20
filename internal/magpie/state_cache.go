@@ -15,7 +15,13 @@ import (
 	"path/filepath"
 )
 
-const hostedStateCacheVersion = 1
+const (
+	hostedStateCacheEnvelopeVersion = 1
+	// hostedStateMaterializationVersion must be bumped whenever State or
+	// applyNode changes how an event history projects into materialized state.
+	// A mismatch invalidates the checkpoint and forces a cold replay.
+	hostedStateMaterializationVersion = 1
+)
 
 type hostedStateCache struct {
 	dir  string
@@ -31,37 +37,41 @@ type encryptedStateCheckpoint struct {
 }
 
 type stateCheckpoint struct {
-	Version int   `json:"version"`
-	State   State `json:"state"`
+	MaterializationVersion int   `json:"materialization_version"`
+	State                  State `json:"state"`
 }
 
 func newHostedStateCache(dir, baseURL, token string) (*hostedStateCache, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create Magpie cache base directory: %w", err)
 	}
-	baseInfo, err := os.Stat(dir)
+	baseInfo, err := os.Lstat(dir)
 	if err != nil {
 		return nil, fmt.Errorf("stat Magpie cache base directory: %w", err)
 	}
-	if !baseInfo.IsDir() {
-		return nil, appErr(ErrValidation, "MAGPIE_CACHE_DIR must be a directory")
+	if !baseInfo.IsDir() || baseInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, appErr(ErrValidation, "MAGPIE_CACHE_DIR must be a real directory, not a symlink")
 	}
-	if baseInfo.Mode().Perm()&0o022 != 0 && baseInfo.Mode()&os.ModeSticky == 0 {
+	if baseInfo.Mode().Perm()&0o022 != 0 {
 		return nil, appErr(ErrPermission, "MAGPIE_CACHE_DIR must not be writable by group or other users")
 	}
 	privateDir := filepath.Join(dir, "state")
-	if err := os.MkdirAll(privateDir, 0o700); err != nil {
+	if err := os.Mkdir(privateDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, fmt.Errorf("create Magpie cache directory: %w", err)
+	}
+	info, err := os.Lstat(privateDir)
+	if err != nil {
+		return nil, fmt.Errorf("stat Magpie cache directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, appErr(ErrValidation, "Magpie cache state path must be a real directory, not a symlink")
 	}
 	if err := os.Chmod(privateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure Magpie cache directory: %w", err)
 	}
-	info, err := os.Stat(privateDir)
+	info, err = os.Lstat(privateDir)
 	if err != nil {
-		return nil, fmt.Errorf("stat Magpie cache directory: %w", err)
-	}
-	if !info.IsDir() {
-		return nil, appErr(ErrValidation, "MAGPIE_CACHE_DIR must be a directory")
+		return nil, fmt.Errorf("restat Magpie cache directory: %w", err)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		return nil, appErr(ErrPermission, "MAGPIE_CACHE_DIR must not be accessible by group or other users")
@@ -74,7 +84,7 @@ func newHostedStateCache(dir, baseURL, token string) (*hostedStateCache, error) 
 		dir:  privateDir,
 		path: filepath.Join(privateDir, name),
 		key:  key,
-		aad:  []byte(fmt.Sprintf("magpie-hosted-state-cache:%d:%s", hostedStateCacheVersion, baseURL)),
+		aad:  []byte(fmt.Sprintf("magpie-hosted-state-cache:%d:%s", hostedStateCacheEnvelopeVersion, baseURL)),
 	}, nil
 }
 
@@ -103,7 +113,7 @@ func (c *hostedStateCache) Load() (State, bool, error) {
 		return State{}, false, fmt.Errorf("read Magpie state checkpoint: %w", err)
 	}
 	var encrypted encryptedStateCheckpoint
-	if err := json.Unmarshal(raw, &encrypted); err != nil || encrypted.Version != hostedStateCacheVersion {
+	if err := json.Unmarshal(raw, &encrypted); err != nil || encrypted.Version != hostedStateCacheEnvelopeVersion {
 		return c.invalidateCorrupt()
 	}
 	aead, err := c.aead()
@@ -115,7 +125,7 @@ func (c *hostedStateCache) Load() (State, bool, error) {
 		return c.invalidateCorrupt()
 	}
 	var checkpoint stateCheckpoint
-	if err := json.Unmarshal(plaintext, &checkpoint); err != nil || checkpoint.Version != hostedStateCacheVersion || !validCheckpointState(checkpoint.State) {
+	if err := json.Unmarshal(plaintext, &checkpoint); err != nil || checkpoint.MaterializationVersion != hostedStateMaterializationVersion || !validCheckpointState(checkpoint.State) {
 		return c.invalidateCorrupt()
 	}
 	return checkpoint.State, true, nil
@@ -125,7 +135,7 @@ func (c *hostedStateCache) Save(st State) error {
 	if !validCheckpointState(st) {
 		return appErr(ErrIntegrity, "refusing to cache an incomplete Magpie state")
 	}
-	plaintext, err := json.Marshal(stateCheckpoint{Version: hostedStateCacheVersion, State: st})
+	plaintext, err := json.Marshal(stateCheckpoint{MaterializationVersion: hostedStateMaterializationVersion, State: st})
 	if err != nil {
 		return fmt.Errorf("encode Magpie state checkpoint: %w", err)
 	}
@@ -138,7 +148,7 @@ func (c *hostedStateCache) Save(st State) error {
 		return fmt.Errorf("create Magpie state checkpoint nonce: %w", err)
 	}
 	raw, err := json.Marshal(encryptedStateCheckpoint{
-		Version: hostedStateCacheVersion, Nonce: nonce,
+		Version: hostedStateCacheEnvelopeVersion, Nonce: nonce,
 		Ciphertext: aead.Seal(nil, nonce, plaintext, c.aad),
 	})
 	if err != nil {

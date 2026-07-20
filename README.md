@@ -867,7 +867,16 @@ The checkpoint is a performance hint, not a source of truth. If Jaybase returns
 `404 not_found` for its cached root after a restore or store replacement,
 Magpie deletes the checkpoint and performs one cold replay. Appends still use
 the root produced by fully applying that bounded replay, preserving Jaybase's
-optimistic concurrency semantics.
+optimistic concurrency semantics. Magpie also invalidates a warm checkpoint and
+cold-replays once when applying a suffix exposes logically stale materialized
+state. Operators can manually clear the private `state/` subdirectory under
+`MAGPIE_CACHE_DIR` to force the same recovery.
+
+Checkpoint persistence is best-effort: a local cache write failure does not
+discard correctly reconstructed business state, and the next command simply
+re-fetches the missing suffix. A single incremental catch-up is capped at
+10,000 pages and 500,000 events so a nonconforming server cannot grow client
+memory without bound.
 
 In local mode, the default store directory is `.magpie/`:
 
@@ -911,3 +920,8 @@ files according to the deployment's retention policy. Local production
 deployments should provide `JAYBASE_DATA_KEY` from a managed secret store or KMS
 and keep local key files out of backups. Hosted deployments manage the data key
 and encrypted backups on the Jaybase server instead.
+
+Checkpoint envelope and materialization schemas are versioned separately. Any
+change to `State`, `applyNode`, or another event-to-state projection rule must
+bump `hostedStateMaterializationVersion` so existing warm checkpoints are
+invalidated and rebuilt under the new reducer semantics.

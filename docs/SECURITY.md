@@ -19,6 +19,8 @@ This document records the Phase 1 controls intended to support SOC 2, PCI DSS, a
 - Hosted replay follows the authenticated, payload-explicit, paginated `/v1/events` API rather than reading Jaybase data files directly.
 - Optional hosted state checkpoints are AES-256-GCM encrypted with an origin- and credential-specific key, stored in a private directory, and atomically replaced with owner-only permissions.
 - Incremental replay persists only the first page's captured root after applying through that exact event; concurrent newer events cannot enter the cached state accidentally.
+- Cache envelope and materialization schemas are versioned separately; changes to event-to-state projection rules must bump the materialization version and force a cold replay.
+- Cache persistence is best-effort and bounded replay has page/event limits, so local cache failures and nonterminating remote pagination do not silently replace authoritative state.
 
 ## Production Requirements Before External Deployment
 
