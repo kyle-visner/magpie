@@ -97,6 +97,12 @@ state; audit output remains metadata-only. Writes use Jaybase's `expected_root`
 and `Idempotency-Key` contract and return a conflict instead of overwriting a
 newer root.
 
+Magpie can share one linear Jaybase history with Martin. Replay applies the
+legacy Magpie node types, skips `martin.*` nodes while still advancing to their
+roots, and fails closed for other unknown node types or malformed Magpie
+events. `magpie init` adds the Magpie bootstrap after a foreign-only history and
+remains idempotent once that bootstrap exists.
+
 For development without building first, use:
 
 ```sh
@@ -854,6 +860,9 @@ complete event history. This keeps local and hosted behavior identical, but its
 latency, bandwidth, and server work grow linearly with history size. Large or
 high-frequency ledgers will need incremental state caching, compaction, or a
 server-side materialized-state endpoint before this backend scales efficiently.
+Hosted Jaybase currently decrypts foreign payloads before returning replay
+pages; server-side type filtering remains a future optimization. Local replay
+classifies `martin.*` nodes from metadata and does not decrypt their payloads.
 
 In local mode, the default store directory is `.magpie/`:
 
