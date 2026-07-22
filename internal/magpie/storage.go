@@ -162,8 +162,9 @@ func (s *Store) writeNamedRef(name, root string) error {
 }
 
 func (s *Store) WriteInitialRoot(ctx Context) (string, error) {
+	const appendAttempts = 4
 	var conflict error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 0; attempt < appendAttempts; attempt++ {
 		state, initialized, err := s.loadState()
 		if err != nil {
 			return "", err
@@ -181,6 +182,13 @@ func (s *Store) WriteInitialRoot(ctx Context) (string, error) {
 			return "", err
 		}
 		conflict = err
+	}
+	state, initialized, err := s.loadState()
+	if err != nil {
+		return "", err
+	}
+	if initialized {
+		return state.Root, nil
 	}
 	return "", conflict
 }
@@ -263,11 +271,6 @@ func (s *Store) replayNodes(st *State, nodes []Node) (bool, error) {
 		initialized = initialized || isInitialization
 	}
 	return initialized, nil
-}
-
-func (s *Store) applyNode(st *State, node Node) error {
-	_, err := s.applyNodeWithMetadata(st, node)
-	return err
 }
 
 func (s *Store) applyNodeWithMetadata(st *State, node Node) (bool, error) {

@@ -860,9 +860,13 @@ complete event history. This keeps local and hosted behavior identical, but its
 latency, bandwidth, and server work grow linearly with history size. Large or
 high-frequency ledgers will need incremental state caching, compaction, or a
 server-side materialized-state endpoint before this backend scales efficiently.
-Hosted Jaybase currently decrypts foreign payloads before returning replay
-pages; server-side type filtering remains a future optimization. Local replay
-classifies `martin.*` nodes from metadata and does not decrypt their payloads.
+Hosted replay currently requests payloads for the complete event page, so
+Jaybase decrypts foreign payloads before Magpie can classify them. A corrupt or
+key-mismatched foreign payload therefore fails the entire hosted replay page
+closed and can prevent Magpie state loading or initialization. Metadata-first
+replay with selective payload fetch for Magpie-owned types remains required to
+remove that availability coupling. Local replay classifies `martin.*` nodes
+from metadata and does not decrypt their payloads.
 
 In local mode, the default store directory is `.magpie/`:
 

@@ -21,6 +21,39 @@ func (b *payloadRecordingBackend) NodePayload(node jaybase.Node) ([]byte, error)
 	return b.storageBackend.NodePayload(node)
 }
 
+type initRaceBackend struct {
+	storageBackend
+	conflicts  int
+	winnerOn   int
+	attempts   int
+	foreign    []string
+	winnerRoot string
+}
+
+func (b *initRaceBackend) AppendAt(ctx jaybase.Context, options jaybase.AppendOptions, expectedRoot string) (string, error) {
+	if options.Type != "store.init" || b.attempts >= b.conflicts {
+		return b.storageBackend.AppendAt(ctx, options, expectedRoot)
+	}
+	b.attempts++
+	foreignRoot, err := b.storageBackend.AppendAt(ctx, jaybase.AppendOptions{
+		Type:      "martin.concurrent",
+		Command:   "concurrent foreign append",
+		Payload:   map[string]any{"attempt": b.attempts},
+		CreatedAt: options.CreatedAt,
+	}, expectedRoot)
+	if err != nil {
+		return "", err
+	}
+	b.foreign = append(b.foreign, foreignRoot)
+	if b.winnerOn == b.attempts {
+		b.winnerRoot, err = b.storageBackend.AppendAt(ctx, options, foreignRoot)
+		if err != nil {
+			return "", err
+		}
+	}
+	return b.storageBackend.AppendAt(ctx, options, expectedRoot)
+}
+
 func newTestStore(t *testing.T) (*Store, Context) {
 	t.Helper()
 	s, err := OpenStore(t.TempDir())
@@ -1762,6 +1795,63 @@ func TestSharedHistoryInitializationIsDomainAwareAndIdempotent(t *testing.T) {
 	}
 	if len(nodes) != 2 || nodes[0].Hash != foreignRoot || nodes[1].Type != "store.init" {
 		t.Fatalf("initialization replaced or reordered foreign history: %#v", nodes)
+	}
+}
+
+func TestSharedHistoryInitializationRetriesAfterForeignRootMovement(t *testing.T) {
+	s, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	race := &initRaceBackend{storageBackend: s.db, conflicts: 1}
+	s.db = race
+
+	root, err := s.WriteInitialRoot(Context{Actor: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if race.attempts != 1 || len(race.foreign) != 1 {
+		t.Fatalf("expected one forced foreign conflict, got attempts=%d roots=%#v", race.attempts, race.foreign)
+	}
+	nodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 || nodes[0].Hash != race.foreign[0] || nodes[1].Hash != root || nodes[1].Parents[0] != race.foreign[0] {
+		t.Fatalf("Magpie init did not rebase onto the concurrent foreign root: %#v", nodes)
+	}
+	repeatedRoot, err := s.WriteInitialRoot(Context{Actor: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedRoot != root || race.attempts != 1 {
+		t.Fatalf("repeated init was not idempotent: root=%s attempts=%d", repeatedRoot, race.attempts)
+	}
+}
+
+func TestSharedHistoryInitializationReconcilesWinnerAfterLastConflict(t *testing.T) {
+	s, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	race := &initRaceBackend{storageBackend: s.db, conflicts: 4, winnerOn: 4}
+	s.db = race
+
+	root, err := s.WriteInitialRoot(Context{Actor: "owner"})
+	if err != nil {
+		t.Fatalf("final reconciliation should accept the concurrent bootstrap winner: %v", err)
+	}
+	if race.attempts != 4 || root == "" || root != race.winnerRoot {
+		t.Fatalf("unexpected reconciled root=%s winner=%s attempts=%d", root, race.winnerRoot, race.attempts)
+	}
+	state, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != root || state.Users["owner"].Role != "Owner" {
+		t.Fatalf("concurrent bootstrap winner did not initialize state: %#v", state)
 	}
 }
 
