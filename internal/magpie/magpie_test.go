@@ -3,10 +3,56 @@ package magpie
 import (
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kyle-visner/jaybase"
 )
+
+type payloadRecordingBackend struct {
+	storageBackend
+	payloadTypes []string
+}
+
+func (b *payloadRecordingBackend) NodePayload(node jaybase.Node) ([]byte, error) {
+	b.payloadTypes = append(b.payloadTypes, node.Type)
+	return b.storageBackend.NodePayload(node)
+}
+
+type initRaceBackend struct {
+	storageBackend
+	conflicts  int
+	winnerOn   int
+	attempts   int
+	foreign    []string
+	winnerRoot string
+}
+
+func (b *initRaceBackend) AppendAt(ctx jaybase.Context, options jaybase.AppendOptions, expectedRoot string) (string, error) {
+	if options.Type != "store.init" || b.attempts >= b.conflicts {
+		return b.storageBackend.AppendAt(ctx, options, expectedRoot)
+	}
+	b.attempts++
+	foreignRoot, err := b.storageBackend.AppendAt(ctx, jaybase.AppendOptions{
+		Type:      "martin.concurrent",
+		Command:   "concurrent foreign append",
+		Payload:   map[string]any{"attempt": b.attempts},
+		CreatedAt: options.CreatedAt,
+	}, expectedRoot)
+	if err != nil {
+		return "", err
+	}
+	b.foreign = append(b.foreign, foreignRoot)
+	if b.winnerOn == b.attempts {
+		b.winnerRoot, err = b.storageBackend.AppendAt(ctx, options, foreignRoot)
+		if err != nil {
+			return "", err
+		}
+	}
+	return b.storageBackend.AppendAt(ctx, options, expectedRoot)
+}
 
 func newTestStore(t *testing.T) (*Store, Context) {
 	t.Helper()
@@ -1653,6 +1699,236 @@ func TestNodePayloadsAreEncryptedAtRest(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "AES-256-GCM") {
 		t.Fatalf("node file does not advertise payload encryption: %s", string(b))
+	}
+}
+
+func TestSharedHistorySkipsForeignPayloadAndUsesForeignRootForNextWrite(t *testing.T) {
+	s, ctx := newTestStore(t)
+	initRoot, err := s.currentRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignRoot, err := s.appendEventAt(ctx, "martin.contact.updated", "contact:1", "contact update", map[string]any{
+		"schema": "not-a-magpie-envelope",
+	}, initRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &payloadRecordingBackend{storageBackend: s.db}
+	s.db = recorder
+	repeatedInitRoot, err := s.WriteInitialRoot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedInitRoot != foreignRoot {
+		t.Fatalf("repeated initialization did not preserve the foreign head: got %s want %s", repeatedInitRoot, foreignRoot)
+	}
+
+	note, noteRoot, err := s.UpsertNote(ctx, "", "Shared history", "Magpie remains writable", "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noteRoot == foreignRoot {
+		t.Fatal("Magpie write did not advance the shared root")
+	}
+	for _, typ := range recorder.payloadTypes {
+		if strings.HasPrefix(typ, "martin.") {
+			t.Fatalf("foreign payload was decrypted during local replay: %#v", recorder.payloadTypes)
+		}
+	}
+
+	state, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != noteRoot || state.Notes[note.ID].Body != "Magpie remains writable" {
+		t.Fatalf("shared history replay produced unexpected state: %#v", state)
+	}
+	nodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 3 || nodes[1].Hash != foreignRoot || nodes[2].Parents[0] != foreignRoot {
+		t.Fatalf("Magpie append was not based on the foreign head: %#v", nodes)
+	}
+}
+
+func TestSharedHistoryInitializationIsDomainAwareAndIdempotent(t *testing.T) {
+	s, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := Context{Actor: "owner"}
+	foreignRoot, err := s.appendEventAt(ctx, "martin.company.created", "company:1", "company create", map[string]any{
+		"company_name": "Future Perfect",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	initRoot, err := s.WriteInitialRoot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initRoot == foreignRoot {
+		t.Fatal("Magpie treated a foreign-only history as initialized")
+	}
+	repeatedRoot, err := s.WriteInitialRoot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedRoot != initRoot {
+		t.Fatalf("repeated initialization changed root: got %s want %s", repeatedRoot, initRoot)
+	}
+
+	state, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != initRoot || state.Users["owner"].Role != "Owner" {
+		t.Fatalf("Magpie bootstrap did not replay after foreign history: %#v", state)
+	}
+	nodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 || nodes[0].Hash != foreignRoot || nodes[1].Type != "store.init" {
+		t.Fatalf("initialization replaced or reordered foreign history: %#v", nodes)
+	}
+}
+
+func TestSharedHistoryInitializationRetriesAfterForeignRootMovement(t *testing.T) {
+	s, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	race := &initRaceBackend{storageBackend: s.db, conflicts: 1}
+	s.db = race
+
+	root, err := s.WriteInitialRoot(Context{Actor: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if race.attempts != 1 || len(race.foreign) != 1 {
+		t.Fatalf("expected one forced foreign conflict, got attempts=%d roots=%#v", race.attempts, race.foreign)
+	}
+	nodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 || nodes[0].Hash != race.foreign[0] || nodes[1].Hash != root || nodes[1].Parents[0] != race.foreign[0] {
+		t.Fatalf("Magpie init did not rebase onto the concurrent foreign root: %#v", nodes)
+	}
+	repeatedRoot, err := s.WriteInitialRoot(Context{Actor: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedRoot != root || race.attempts != 1 {
+		t.Fatalf("repeated init was not idempotent: root=%s attempts=%d", repeatedRoot, race.attempts)
+	}
+}
+
+func TestSharedHistoryInitializationReconcilesWinnerAfterLastConflict(t *testing.T) {
+	s, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	race := &initRaceBackend{storageBackend: s.db, conflicts: 4, winnerOn: 4}
+	s.db = race
+
+	root, err := s.WriteInitialRoot(Context{Actor: "owner"})
+	if err != nil {
+		t.Fatalf("final reconciliation should accept the concurrent bootstrap winner: %v", err)
+	}
+	if race.attempts != 4 || root == "" || root != race.winnerRoot {
+		t.Fatalf("unexpected reconciled root=%s winner=%s attempts=%d", root, race.winnerRoot, race.attempts)
+	}
+	state, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != root || state.Users["owner"].Role != "Owner" {
+		t.Fatalf("concurrent bootstrap winner did not initialize state: %#v", state)
+	}
+}
+
+func TestSharedHistoryCheckpointReplayMatchesColdReplay(t *testing.T) {
+	s, ctx := newTestStore(t)
+	first, _, err := s.UpsertNote(ctx, "", "Before checkpoint", "first", "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointNodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := emptyState()
+	if _, err := s.replayNodes(&checkpoint, checkpointNodes); err != nil {
+		t.Fatal(err)
+	}
+
+	foreignRoot, err := s.appendEventAt(ctx, "martin.activity.logged", "activity:1", "activity log", map[string]any{
+		"body": "opaque CRM payload",
+	}, checkpoint.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, finalRoot, err := s.UpsertNote(ctx, "", "After checkpoint", "second", "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allNodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail := allNodes[len(checkpointNodes):]
+	if len(tail) != 2 || tail[0].Hash != foreignRoot {
+		t.Fatalf("unexpected checkpoint tail: %#v", tail)
+	}
+	if _, err := s.replayNodes(&checkpoint, tail); err != nil {
+		t.Fatal(err)
+	}
+	cold, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Root != finalRoot || !reflect.DeepEqual(checkpoint, cold) {
+		t.Fatalf("checkpoint and cold replay differ:\ncheckpoint=%#v\ncold=%#v", checkpoint, cold)
+	}
+	if checkpoint.Notes[first.ID].Body != "first" || checkpoint.Notes[second.ID].Body != "second" {
+		t.Fatalf("checkpoint replay lost Magpie events: %#v", checkpoint.Notes)
+	}
+}
+
+func TestSharedHistoryStillFailsClosedForMagpieAndUnknownLegacyEvents(t *testing.T) {
+	tests := []struct {
+		name    string
+		typ     string
+		payload any
+	}{
+		{name: "malformed recognized Magpie payload", typ: "note", payload: map[string]any{"body": "not an envelope"}},
+		{name: "unknown Magpie event kind", typ: "note", payload: wrapEvent("note.deleted", map[string]any{"id": "note:1"})},
+		{name: "unknown unnamespaced legacy event", typ: "mystery", payload: map[string]any{"kind": "opaque"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s, ctx := newTestStore(t)
+			root, err := s.currentRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.appendEventAt(ctx, test.typ, "test:1", "test append", test.payload, root); err != nil {
+				t.Fatal(err)
+			}
+			_, err = s.LoadState()
+			var appError *AppError
+			if !errors.As(err, &appError) || appError.Code != ErrValidation {
+				t.Fatalf("expected validation failure, got %T %v", err, err)
+			}
+		})
 	}
 }
 

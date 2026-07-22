@@ -36,6 +36,23 @@ func newHostedJaybaseStub() *hostedJaybaseStub {
 	}
 }
 
+func (s *hostedJaybaseStub) appendForeign(typ string, payload any) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	raw, _ := json.Marshal(payload)
+	hash := fmt.Sprintf("sha256:%064x", len(s.events)+1)
+	parents := []string{}
+	if s.root != "" {
+		parents = []string{s.root}
+	}
+	s.events = append(s.events, jaybase.Node{
+		Schema: 1, Hash: hash, Type: typ, Parents: parents, Payload: raw,
+		Actor: "martin-client", Role: "writer", Command: "foreign append", CreatedAt: time.Now().UTC(),
+	})
+	s.root = hash
+	return hash
+}
+
 func (s *hostedJaybaseStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "Bearer writer-token" {
 		s.mu.Lock()
@@ -254,6 +271,44 @@ func TestRemoteStoreUsesHostedJaybaseContract(t *testing.T) {
 	}
 }
 
+func TestRemoteStoreInterleavesForeignEventsAndAppendsAtSharedRoot(t *testing.T) {
+	stub := newHostedJaybaseStub()
+	server := httptest.NewServer(stub)
+	defer server.Close()
+
+	store, err := openRemoteStore(server.URL, "writer-token", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.WriteInitialRoot(Context{Actor: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	foreignRoot := stub.appendForeign("martin.contact.updated", map[string]any{
+		"schema": "not-a-magpie-envelope",
+	})
+	note, noteRoot, err := store.UpsertNote(Context{Actor: "owner"}, "", "Hosted shared history", "works", "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != noteRoot || state.Notes[note.ID].Body != "works" {
+		t.Fatalf("hosted shared replay produced unexpected state: %#v", state)
+	}
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.expectedRoots) != 2 || stub.expectedRoots[1] != foreignRoot {
+		t.Fatalf("hosted Magpie append did not use foreign head: %#v", stub.expectedRoots)
+	}
+	if len(stub.events) != 3 || stub.events[2].Parents[0] != foreignRoot {
+		t.Fatalf("unexpected hosted event chain: %#v", stub.events)
+	}
+}
+
 func TestRemoteNamedRefReconcilesLostSuccessResponse(t *testing.T) {
 	stub := newHostedJaybaseStub()
 	server := httptest.NewServer(stub)
@@ -329,6 +384,10 @@ func TestRemoteConcurrentSameRootSnapshotsAreIdempotent(t *testing.T) {
 func TestRemoteInitialRootReconcilesConcurrentWinner(t *testing.T) {
 	const winner = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	var initialized atomic.Bool
+	initPayload, err := json.Marshal(initEvent())
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/root":
@@ -341,6 +400,14 @@ func TestRemoteInitialRootReconcilesConcurrentWinner(t *testing.T) {
 			initialized.Store(true)
 			writeStubJSON(w, http.StatusConflict, map[string]any{
 				"error": map[string]string{"code": "conflict", "message": "root changed"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/events" && initialized.Load():
+			writeStubJSON(w, http.StatusOK, map[string]any{
+				"events": []jaybase.Node{{
+					Schema: 1, Hash: winner, Type: "store.init", Payload: initPayload,
+					Actor: "owner", Command: "store init", CreatedAt: time.Now().UTC(),
+				}},
+				"root": winner, "has_more": false,
 			})
 		default:
 			writeStubJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "not found"}})

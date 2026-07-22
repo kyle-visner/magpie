@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/kyle-visner/jaybase"
@@ -40,6 +41,23 @@ type EncryptedPayload = jaybase.EncryptedPayload
 type eventEnvelope struct {
 	Kind string          `json:"kind"`
 	Data json.RawMessage `json:"data"`
+}
+
+var legacyMagpieNodeTypes = map[string]struct{}{
+	"book.settings":  {},
+	"customer":       {},
+	"invoice":        {},
+	"ledger.account": {},
+	"ledger.journal": {},
+	"note":           {},
+	"payout":         {},
+	"rbac.role":      {},
+	"rbac.user":      {},
+	"store.init":     {},
+}
+
+var foreignApplicationPrefixes = []string{
+	"martin.",
 }
 
 func OpenStore(dir string) (*Store, error) {
@@ -144,27 +162,35 @@ func (s *Store) writeNamedRef(name, root string) error {
 }
 
 func (s *Store) WriteInitialRoot(ctx Context) (string, error) {
-	root, err := s.currentRoot()
+	const appendAttempts = 4
+	var conflict error
+	for attempt := 0; attempt < appendAttempts; attempt++ {
+		state, initialized, err := s.loadState()
+		if err != nil {
+			return "", err
+		}
+		if initialized {
+			return state.Root, nil
+		}
+
+		root, err := s.appendEventAt(ctx, "store.init", "", "store init", initEvent(), state.Root)
+		if err == nil {
+			return root, nil
+		}
+		var appError *AppError
+		if !errors.As(err, &appError) || appError.Code != ErrConflict {
+			return "", err
+		}
+		conflict = err
+	}
+	state, initialized, err := s.loadState()
 	if err != nil {
 		return "", err
 	}
-	if root != "" {
-		return root, nil
+	if initialized {
+		return state.Root, nil
 	}
-	event := initEvent()
-	root, err = s.appendEventAt(ctx, "store.init", "", "store init", event, root)
-	if err == nil {
-		return root, nil
-	}
-	var appError *AppError
-	if !errors.As(err, &appError) || appError.Code != ErrConflict {
-		return "", err
-	}
-	current, currentErr := s.currentRoot()
-	if currentErr == nil && current != "" {
-		return current, nil
-	}
-	return "", err
+	return "", conflict
 }
 
 func (s *Store) appendEvent(ctx Context, typ, entityID, command string, payload any, skipRootCheck bool) (string, error) {
@@ -213,38 +239,62 @@ func (s *Store) AuditLog() ([]Node, error) {
 }
 
 func (s *Store) LoadState() (State, error) {
+	state, _, err := s.loadState()
+	return state, err
+}
+
+func (s *Store) loadState() (State, bool, error) {
 	root, err := s.currentRoot()
 	if err != nil {
-		return State{}, err
+		return State{}, false, err
 	}
 	st := emptyState()
 	nodes, err := s.NodesFromRoot(root)
 	if err != nil {
-		return State{}, err
+		return State{}, false, err
 	}
-	for _, node := range nodes {
-		if err := s.applyNode(&st, node); err != nil {
-			return State{}, err
-		}
-		st.Root = node.Hash
+	initialized, err := s.replayNodes(&st, nodes)
+	if err != nil {
+		return State{}, false, err
 	}
-	return st, nil
+	return st, initialized, nil
 }
 
-func (s *Store) applyNode(st *State, node Node) error {
+func (s *Store) replayNodes(st *State, nodes []Node) (bool, error) {
+	initialized := false
+	for _, node := range nodes {
+		isInitialization, err := s.applyNodeWithMetadata(st, node)
+		if err != nil {
+			return false, err
+		}
+		st.Root = node.Hash
+		initialized = initialized || isInitialization
+	}
+	return initialized, nil
+}
+
+func (s *Store) applyNodeWithMetadata(st *State, node Node) (bool, error) {
+	magpieOwned, err := classifyNodeType(node)
+	if err != nil {
+		return false, err
+	}
+	if !magpieOwned {
+		return false, nil
+	}
+
 	var env eventEnvelope
 	payload, err := s.nodePayload(node)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := json.Unmarshal(payload, &env); err != nil {
-		return err
+		return false, err
 	}
 	switch env.Kind {
 	case "init":
 		var ev initPayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		st.Roles = ev.Roles
 		st.Users = ev.Users
@@ -255,34 +305,34 @@ func (s *Store) applyNode(st *State, node Node) error {
 	case "role.upsert":
 		var ev roleUpsertPayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		st.Roles[ev.Role.Name] = ev.Role
 	case "user.upsert":
 		var ev userUpsertPayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		st.Users[ev.User.ID] = ev.User
 	case "account.create":
 		var ev accountCreatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		st.Accounts[ev.Account.ID] = ev.Account
 	case "account.update":
 		var ev accountUpdatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		if _, ok := st.Accounts[ev.Account.ID]; !ok {
-			return appErr(ErrValidation, "account.update references unknown account %s", ev.Account.ID)
+			return false, appErr(ErrValidation, "account.update references unknown account %s", ev.Account.ID)
 		}
 		st.Accounts[ev.Account.ID] = ev.Account
 	case "journal.create":
 		var ev journalCreatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		if ev.Entry.AccountingBasis == "" {
 			ev.Entry.AccountingBasis = st.effectiveSettings().AccountingBasis
@@ -291,7 +341,7 @@ func (s *Store) applyNode(st *State, node Node) error {
 			ev.Entry.Origin = JournalOriginManualAdjustment
 		}
 		if _, err := normalizeJournalOrigin(ev.Entry.Origin); err != nil {
-			return err
+			return false, err
 		}
 		st.JournalEntries[ev.Entry.ID] = ev.Entry
 		if ev.SourceKey != "" {
@@ -300,49 +350,49 @@ func (s *Store) applyNode(st *State, node Node) error {
 	case "customer.upsert":
 		var ev customerUpsertPayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		st.Customers[ev.Customer.ID] = ev.Customer
 	case "invoice.create":
 		var ev invoiceCreatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		st.Invoices[ev.Invoice.ID] = ev.Invoice
 	case "invoice.update":
 		var ev invoiceUpdatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		if _, ok := st.Invoices[ev.Invoice.ID]; !ok {
-			return appErr(ErrValidation, "invoice.update references unknown invoice %s", ev.Invoice.ID)
+			return false, appErr(ErrValidation, "invoice.update references unknown invoice %s", ev.Invoice.ID)
 		}
 		st.Invoices[ev.Invoice.ID] = ev.Invoice
 	case "payout.create":
 		var ev payoutCreatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		if _, ok := st.Payouts[ev.Payout.ID]; ok {
-			return appErr(ErrValidation, "payout.create references existing payout %s", ev.Payout.ID)
+			return false, appErr(ErrValidation, "payout.create references existing payout %s", ev.Payout.ID)
 		}
 		st.Payouts[ev.Payout.ID] = ev.Payout
 	case "payout.update":
 		var ev payoutUpdatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		if _, ok := st.Payouts[ev.Payout.ID]; !ok {
-			return appErr(ErrValidation, "payout.update references unknown payout %s", ev.Payout.ID)
+			return false, appErr(ErrValidation, "payout.update references unknown payout %s", ev.Payout.ID)
 		}
 		st.Payouts[ev.Payout.ID] = ev.Payout
 	case "settings.update":
 		var ev settingsUpdatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		if _, err := normalizeAccountingBasis(ev.Settings.AccountingBasis); err != nil {
-			return err
+			return false, err
 		}
 		st.Settings = ev.Settings
 		if st.Settings.ModifiedCashPolicy == (ModifiedCashPolicy{}) {
@@ -351,13 +401,25 @@ func (s *Store) applyNode(st *State, node Node) error {
 	case "note.upsert":
 		var ev noteUpsertPayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
 		st.Notes[ev.Note.ID] = ev.Note
 	default:
-		return appErr(ErrValidation, "unknown event kind %q in node %s", env.Kind, node.Hash)
+		return false, appErr(ErrValidation, "unknown event kind %q in node %s", env.Kind, node.Hash)
 	}
-	return nil
+	return node.Type == "store.init" && env.Kind == "init", nil
+}
+
+func classifyNodeType(node Node) (bool, error) {
+	if _, ok := legacyMagpieNodeTypes[node.Type]; ok {
+		return true, nil
+	}
+	for _, prefix := range foreignApplicationPrefixes {
+		if strings.HasPrefix(node.Type, prefix) {
+			return false, nil
+		}
+	}
+	return false, appErr(ErrValidation, "unknown event type %q in node %s", node.Type, node.Hash)
 }
 
 func (s *Store) nodePayload(node Node) ([]byte, error) {
