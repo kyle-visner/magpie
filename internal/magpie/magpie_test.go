@@ -1753,6 +1753,48 @@ func TestSharedHistorySkipsForeignPayloadAndUsesForeignRootForNextWrite(t *testi
 	}
 }
 
+func TestBDDAerieCommitsRemainForeignWhileAdvancingMagpieRoot(t *testing.T) {
+	s, ctx := newTestStore(t)
+	before, err := s.currentRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aerieRoot, err := s.appendEventAt(ctx, "aerie.commit.created.v1", "repository:default", "commit", map[string]any{
+		"message": "Document onboarding",
+		"changes": []map[string]any{{"operation": "put_text", "path": "onboarding.md"}},
+	}, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &payloadRecordingBackend{storageBackend: s.db}
+	s.db = recorder
+
+	state, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != aerieRoot {
+		t.Fatalf("Magpie root=%s want Aerie root=%s", state.Root, aerieRoot)
+	}
+	for _, eventType := range recorder.payloadTypes {
+		if strings.HasPrefix(eventType, "aerie.") {
+			t.Fatalf("Magpie decrypted Aerie payload: %#v", recorder.payloadTypes)
+		}
+	}
+
+	_, noteRoot, err := s.UpsertNote(ctx, "", "After Aerie", "Magpie remains writable", "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noteRoot == aerieRoot || len(nodes) != 3 || nodes[2].Parents[0] != aerieRoot {
+		t.Fatalf("Magpie did not append from Aerie head: note=%s aerie=%s nodes=%#v", noteRoot, aerieRoot, nodes)
+	}
+}
+
 func TestSharedHistoryInitializationIsDomainAwareAndIdempotent(t *testing.T) {
 	s, err := OpenStore(t.TempDir())
 	if err != nil {

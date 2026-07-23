@@ -57,6 +57,7 @@ var legacyMagpieNodeTypes = map[string]struct{}{
 }
 
 var foreignApplicationPrefixes = []string{
+	"aerie.",
 	"martin.",
 }
 
