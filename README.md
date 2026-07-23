@@ -97,11 +97,12 @@ state; audit output remains metadata-only. Writes use Jaybase's `expected_root`
 and `Idempotency-Key` contract and return a conflict instead of overwriting a
 newer root.
 
-Magpie can share one linear Jaybase history with Martin. Replay applies the
-legacy Magpie node types, skips `martin.*` nodes while still advancing to their
-roots, and fails closed for other unknown node types or malformed Magpie
-events. `magpie init` adds the Magpie bootstrap after a foreign-only history and
-remains idempotent once that bootstrap exists.
+Magpie can share one linear Jaybase history with other applications. Replay
+applies the legacy Magpie node types and skips any well-formed foreign
+application namespace while still advancing to its root. Magpie-owned namespace
+roots remain reserved, and malformed or unknown unnamespaced types fail closed.
+`magpie init` adds the Magpie bootstrap after a foreign-only history and remains
+idempotent once that bootstrap exists.
 
 For development without building first, use:
 
@@ -865,8 +866,8 @@ Jaybase decrypts foreign payloads before Magpie can classify them. A corrupt or
 key-mismatched foreign payload therefore fails the entire hosted replay page
 closed and can prevent Magpie state loading or initialization. Metadata-first
 replay with selective payload fetch for Magpie-owned types remains required to
-remove that availability coupling. Local replay classifies `martin.*` nodes
-from metadata and does not decrypt their payloads.
+remove that availability coupling. Local replay classifies well-formed foreign
+application namespaces from metadata and does not decrypt their payloads.
 
 In local mode, the default store directory is `.magpie/`:
 

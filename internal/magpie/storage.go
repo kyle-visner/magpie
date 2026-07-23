@@ -56,9 +56,16 @@ var legacyMagpieNodeTypes = map[string]struct{}{
 	"store.init":     {},
 }
 
-var foreignApplicationPrefixes = []string{
-	"aerie.",
-	"martin.",
+var magpieOwnedNamespaces = map[string]struct{}{
+	"book":     {},
+	"customer": {},
+	"invoice":  {},
+	"ledger":   {},
+	"magpie":   {},
+	"note":     {},
+	"payout":   {},
+	"rbac":     {},
+	"store":    {},
 }
 
 func OpenStore(dir string) (*Store, error) {
@@ -415,12 +422,64 @@ func classifyNodeType(node Node) (bool, error) {
 	if _, ok := legacyMagpieNodeTypes[node.Type]; ok {
 		return true, nil
 	}
-	for _, prefix := range foreignApplicationPrefixes {
-		if strings.HasPrefix(node.Type, prefix) {
-			return false, nil
+	namespace, ok := applicationNamespace(node.Type)
+	if !ok {
+		return false, appErr(ErrValidation, "unknown event type %q in node %s", node.Type, node.Hash)
+	}
+	if _, owned := magpieOwnedNamespaces[namespace]; owned {
+		return false, appErr(ErrValidation, "unknown event type %q in node %s", node.Type, node.Hash)
+	}
+	return false, nil
+}
+
+func applicationNamespace(eventType string) (string, bool) {
+	if len(eventType) > 256 {
+		return "", false
+	}
+	namespace, eventName, found := strings.Cut(eventType, ".")
+	if !found || !validNamespace(namespace) {
+		return "", false
+	}
+	for _, segment := range strings.Split(eventName, ".") {
+		if !validEventTypeSegment(segment) {
+			return "", false
 		}
 	}
-	return false, appErr(ErrValidation, "unknown event type %q in node %s", node.Type, node.Hash)
+	return namespace, true
+}
+
+func validNamespace(value string) bool {
+	if len(value) == 0 || len(value) > 63 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if !lowercaseLetterOrDigit(character) && character != '-' {
+			return false
+		}
+	}
+	return value[len(value)-1] != '-'
+}
+
+func validEventTypeSegment(value string) bool {
+	if len(value) == 0 || len(value) > 63 {
+		return false
+	}
+	for index, character := range []byte(value) {
+		if lowercaseLetterOrDigit(character) {
+			continue
+		}
+		if index > 0 && index < len(value)-1 && (character == '-' || character == '_') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func lowercaseLetterOrDigit(character byte) bool {
+	return (character >= 'a' && character <= 'z') ||
+		(character >= '0' && character <= '9')
 }
 
 func (s *Store) nodePayload(node Node) ([]byte, error) {

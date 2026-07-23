@@ -1753,7 +1753,7 @@ func TestSharedHistorySkipsForeignPayloadAndUsesForeignRootForNextWrite(t *testi
 	}
 }
 
-func TestBDDAerieCommitsRemainForeignWhileAdvancingMagpieRoot(t *testing.T) {
+func TestBDDNamespacedApplicationsRemainForeignWhileAdvancingMagpieRoot(t *testing.T) {
 	s, ctx := newTestStore(t)
 	before, err := s.currentRoot()
 	if err != nil {
@@ -1766,6 +1766,12 @@ func TestBDDAerieCommitsRemainForeignWhileAdvancingMagpieRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	futureRoot, err := s.appendEventAt(ctx, "tern.project.created.v1", "project:default", "create project", map[string]any{
+		"name": "Future application",
+	}, aerieRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	recorder := &payloadRecordingBackend{storageBackend: s.db}
 	s.db = recorder
 
@@ -1773,16 +1779,16 @@ func TestBDDAerieCommitsRemainForeignWhileAdvancingMagpieRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Root != aerieRoot {
-		t.Fatalf("Magpie root=%s want Aerie root=%s", state.Root, aerieRoot)
+	if state.Root != futureRoot {
+		t.Fatalf("Magpie root=%s want future application root=%s", state.Root, futureRoot)
 	}
 	for _, eventType := range recorder.payloadTypes {
-		if strings.HasPrefix(eventType, "aerie.") {
-			t.Fatalf("Magpie decrypted Aerie payload: %#v", recorder.payloadTypes)
+		if strings.HasPrefix(eventType, "aerie.") || strings.HasPrefix(eventType, "tern.") {
+			t.Fatalf("Magpie decrypted foreign application payload: %#v", recorder.payloadTypes)
 		}
 	}
 
-	_, noteRoot, err := s.UpsertNote(ctx, "", "After Aerie", "Magpie remains writable", "internal")
+	_, noteRoot, err := s.UpsertNote(ctx, "", "After foreign apps", "Magpie remains writable", "internal")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1790,8 +1796,8 @@ func TestBDDAerieCommitsRemainForeignWhileAdvancingMagpieRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if noteRoot == aerieRoot || len(nodes) != 3 || nodes[2].Parents[0] != aerieRoot {
-		t.Fatalf("Magpie did not append from Aerie head: note=%s aerie=%s nodes=%#v", noteRoot, aerieRoot, nodes)
+	if noteRoot == futureRoot || len(nodes) != 4 || nodes[3].Parents[0] != futureRoot {
+		t.Fatalf("Magpie did not append from foreign head: note=%s foreign=%s nodes=%#v", noteRoot, futureRoot, nodes)
 	}
 }
 
@@ -1954,6 +1960,10 @@ func TestSharedHistoryStillFailsClosedForMagpieAndUnknownLegacyEvents(t *testing
 		{name: "malformed recognized Magpie payload", typ: "note", payload: map[string]any{"body": "not an envelope"}},
 		{name: "unknown Magpie event kind", typ: "note", payload: wrapEvent("note.deleted", map[string]any{"id": "note:1"})},
 		{name: "unknown unnamespaced legacy event", typ: "mystery", payload: map[string]any{"kind": "opaque"}},
+		{name: "unknown event in reserved Magpie namespace", typ: "ledger.journel", payload: map[string]any{"kind": "opaque"}},
+		{name: "uppercase foreign namespace", typ: "Tern.project.created", payload: map[string]any{"kind": "opaque"}},
+		{name: "missing foreign event name", typ: "tern.", payload: map[string]any{"kind": "opaque"}},
+		{name: "empty foreign event segment", typ: "tern.project..created", payload: map[string]any{"kind": "opaque"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
