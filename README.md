@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/magpie-logo.png" alt="Magpie logo" width="900">
+</p>
+
 # Magpie
 
 ## TL;DR
