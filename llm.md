@@ -24,7 +24,8 @@ directly. The CLI is the supported interface.
 
 ## Install
 
-Magpie requires Go 1.22 or later. Install it from a repository checkout:
+Magpie requires Go 1.26.5 or later. Earlier Go releases must not be used to
+build Magpie release binaries. Install it from a repository checkout:
 
 ```sh
 git clone https://github.com/kyle-visner/magpie.git

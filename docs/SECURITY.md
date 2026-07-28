@@ -17,6 +17,7 @@ This document records the Phase 1 controls intended to support SOC 2, PCI DSS, a
 - Hosted Jaybase access requires a bearer token and HTTPS outside loopback development.
 - Hosted appends use optimistic root preconditions and stable idempotency keys, so concurrent changes and ambiguous retries cannot silently duplicate or overwrite events.
 - Hosted replay follows the authenticated, payload-explicit, paginated `/v1/events` API rather than reading Jaybase data files directly.
+- Pull requests and tagged releases run tests, race detection, vet, module verification, and pinned `govulncheck` scanning with Go 1.26.5.
 
 ## Production Requirements Before External Deployment
 
@@ -25,5 +26,5 @@ This document records the Phase 1 controls intended to support SOC 2, PCI DSS, a
 - Add signed command envelopes for non-interactive agents.
 - Add centralized audit export with retention policies.
 - Add backup and restore drills for store roots, objects, refs, and keys.
-- Add vulnerability scanning and SBOM generation to CI.
+- Add SBOM generation to the release workflow.
 - Add formal data classification rules for PCI/cardholder data and other regulated records.
