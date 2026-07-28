@@ -45,7 +45,6 @@ if [[ -e "${output_dir}" ]] && [[ -n "$(find "${output_dir}" -mindepth 1 -maxdep
   echo "output directory must not exist or must be empty: ${output_dir}" >&2
   exit 1
 fi
-mkdir -p "${output_dir}"
 
 tar_command="${TAR_CMD:-tar}"
 if ! "${tar_command}" --version 2>/dev/null | head -1 | grep -q "GNU tar"; then
@@ -61,6 +60,8 @@ cleanup() {
   esac
 }
 trap cleanup EXIT
+artifact_dir="${build_root}/artifacts"
+mkdir -p "${artifact_dir}"
 
 readonly source_date_epoch="$(git show -s --format=%ct HEAD)"
 readonly release_name="magpie_${version#v}"
@@ -99,12 +100,15 @@ for target in "${targets[@]}"; do
     --numeric-owner \
     -C "${stage_dir}" \
     -cf - . |
-    gzip -n >"${output_dir}/${archive_name}"
+    gzip -n >"${artifact_dir}/${archive_name}"
 done
 
 (
-  cd "${output_dir}"
+  cd "${artifact_dir}"
   sha256sum ./*.tar.gz | LC_ALL=C sort -k2 >SHA256SUMS
 )
+
+mkdir -p "${output_dir}"
+install -m 0644 "${artifact_dir}"/* "${output_dir}/"
 
 echo "built ${version} release archives in ${output_dir}"
