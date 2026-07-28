@@ -1,6 +1,7 @@
 package magpie
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -347,7 +348,15 @@ func (s *Store) MarkInvoicePaid(ctx Context, invoiceID string, req InvoicePaymen
 			return invoice, st.Root, nil
 		}
 	}
-	if paid := invoicePaidAmount(invoice); paid+req.AmountCents > invoice.TotalCents {
+	paid, err := invoicePaidAmount(invoice)
+	if err != nil {
+		return Invoice{}, "", err
+	}
+	paid, err = checkedAddCents(paid, req.AmountCents, "invoice payment total")
+	if err != nil {
+		return Invoice{}, "", err
+	}
+	if paid > invoice.TotalCents {
 		return Invoice{}, "", appErr(ErrValidation, "payment exceeds open invoice balance")
 	}
 	postings := []Posting{{AccountID: cash.ID, Debit: req.AmountCents, Memo: "Invoice payment"}}
@@ -396,7 +405,7 @@ func (s *Store) MarkInvoicePaid(ctx Context, invoiceID string, req InvoicePaymen
 	}
 	invoice.Payments = append(invoice.Payments, payment)
 	invoice.PaymentJournalEntryIDs = append(invoice.PaymentJournalEntryIDs, entry.ID)
-	invoice.Status = invoiceStatusFromPayments(invoice)
+	invoice.Status = invoiceStatusFromPaidAmount(invoice, paid)
 	invoice.UpdatedAt = s.now().UTC()
 	invoice.UpdatedBy = ctx.Actor
 	hash, err := s.appendEventAt(ctx, "invoice", invoice.ID, "invoice mark-paid", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), root)
@@ -465,6 +474,18 @@ func (s *Store) ReverseInvoicePayment(ctx Context, invoiceID string, req Invoice
 	if !ok {
 		return Invoice{}, "", appErr(ErrValidation, "payment journal entry %s not found", payment.JournalEntryID)
 	}
+	updatedInvoice := invoice
+	updatedInvoice.Payments = append([]InvoicePayment(nil), invoice.Payments...)
+	updatedPayment := payment
+	updatedPayment.Reversed = true
+	updatedPayment.ReversalDate = req.Date
+	updatedPayment.ReversalReason = req.Reason
+	updatedInvoice.Payments[paymentIndex] = updatedPayment
+	status, err := invoiceStatusFromPayments(updatedInvoice)
+	if err != nil {
+		return Invoice{}, "", err
+	}
+
 	entry, root, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
 		Date:               req.Date,
 		Memo:               "Invoice payment reversed " + invoice.InvoiceNumber,
@@ -484,13 +505,11 @@ func (s *Store) ReverseInvoicePayment(ctx Context, invoiceID string, req Invoice
 	if err != nil {
 		return Invoice{}, "", err
 	}
-	payment.Reversed = true
-	payment.ReversalDate = req.Date
-	payment.ReversalReason = req.Reason
+	payment = updatedPayment
 	payment.ReversalJournalEntryID = entry.ID
 	invoice.Payments[paymentIndex] = payment
 	invoice.PaymentJournalEntryIDs = append(invoice.PaymentJournalEntryIDs, entry.ID)
-	invoice.Status = invoiceStatusFromPayments(invoice)
+	invoice.Status = status
 	invoice.UpdatedAt = s.now().UTC()
 	invoice.UpdatedBy = ctx.Actor
 	hash, err := s.appendEventAt(ctx, "invoice", invoice.ID, "invoice payment reverse", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), root)
@@ -542,7 +561,10 @@ func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 		if line.Quantity <= 0 {
 			return Invoice{}, appErr(ErrValidation, "invoice line %d quantity must be positive", i)
 		}
-		expected := line.Quantity * line.UnitAmountCents
+		expected, err := checkedMultiplyCents(line.Quantity, line.UnitAmountCents, fmt.Sprintf("invoice line %d amount", i))
+		if err != nil {
+			return Invoice{}, err
+		}
 		if line.AmountCents == 0 {
 			line.AmountCents = expected
 		}
@@ -562,8 +584,14 @@ func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 		if !invoiceRevenueRoles()[account.Role] {
 			return Invoice{}, appErr(ErrValidation, "invoice line %d revenue account must have an invoice revenue role", i)
 		}
-		subtotal += line.AmountCents
-		lineTaxTotal += line.TaxAmountCents
+		subtotal, err = checkedAddCents(subtotal, line.AmountCents, "invoice subtotal")
+		if err != nil {
+			return Invoice{}, err
+		}
+		lineTaxTotal, err = checkedAddCents(lineTaxTotal, line.TaxAmountCents, "invoice line tax total")
+		if err != nil {
+			return Invoice{}, err
+		}
 	}
 	if invoice.SubtotalCents == 0 {
 		invoice.SubtotalCents = subtotal
@@ -580,12 +608,18 @@ func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 	if invoice.TaxAmountCents > 0 && lineTaxTotal > 0 && invoice.TaxAmountCents != lineTaxTotal {
 		return Invoice{}, appErr(ErrValidation, "invoice tax does not equal line item tax total")
 	}
-	total := invoice.SubtotalCents + invoice.TaxAmountCents
+	total, err := checkedAddCents(invoice.SubtotalCents, invoice.TaxAmountCents, "invoice total")
+	if err != nil {
+		return Invoice{}, err
+	}
 	if invoice.TotalCents == 0 {
 		invoice.TotalCents = total
 	}
 	if invoice.TotalCents != total {
 		return Invoice{}, appErr(ErrValidation, "invoice total must equal subtotal plus tax")
+	}
+	if _, err := invoicePaidAmount(invoice); err != nil {
+		return Invoice{}, err
 	}
 	if invoice.Status == "" {
 		invoice.Status = SourceDocumentImported
@@ -614,19 +648,31 @@ func invoiceRevenuePostings(invoice Invoice) []Posting {
 	return postings
 }
 
-func invoicePaidAmount(invoice Invoice) int64 {
+func invoicePaidAmount(invoice Invoice) (int64, error) {
 	var total int64
 	for _, payment := range invoice.Payments {
 		if payment.Reversed {
 			continue
 		}
-		total += payment.AmountCents
+		var err error
+		total, err = checkedAddCents(total, payment.AmountCents, "invoice payment total")
+		if err != nil {
+			return 0, err
+		}
 	}
-	return total
+	return total, nil
 }
 
-func invoiceStatusFromPayments(invoice Invoice) SourceDocumentStatus {
-	if invoicePaidAmount(invoice) == invoice.TotalCents {
+func invoiceStatusFromPayments(invoice Invoice) (SourceDocumentStatus, error) {
+	paid, err := invoicePaidAmount(invoice)
+	if err != nil {
+		return "", err
+	}
+	return invoiceStatusFromPaidAmount(invoice, paid), nil
+}
+
+func invoiceStatusFromPaidAmount(invoice Invoice, paid int64) SourceDocumentStatus {
+	if paid == invoice.TotalCents {
 		return SourceDocumentPaid
 	}
 	return SourceDocumentOpen
