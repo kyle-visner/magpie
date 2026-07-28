@@ -81,6 +81,14 @@ for target in "${targets[@]}"; do
     go build -trimpath -ldflags="-s -w" \
     -o "${stage_dir}/magpie" ./cmd/magpie
   install -m 0644 LICENSE README.md llm.md "${stage_dir}/"
+  install -d \
+    "${stage_dir}/docs/assets" \
+    "${stage_dir}/scripts" \
+    "${stage_dir}/.github/workflows"
+  install -m 0644 docs/SECURITY.md "${stage_dir}/docs/"
+  install -m 0644 docs/assets/magpie-logo.png "${stage_dir}/docs/assets/"
+  install -m 0755 scripts/build-release.sh "${stage_dir}/scripts/"
+  install -m 0644 .github/workflows/release.yml "${stage_dir}/.github/workflows/"
   printf '%s\n' "${version}" >"${stage_dir}/VERSION"
 
   "${tar_command}" \
