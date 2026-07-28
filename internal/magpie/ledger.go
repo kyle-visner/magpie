@@ -530,8 +530,14 @@ func (s *Store) createWorkflowJournalEntry(ctx Context, req workflowJournalReque
 		if p.Debit == 0 && p.Credit == 0 {
 			return JournalEntry{}, "", appErr(ErrValidation, "posting %d must have a debit or credit", i)
 		}
-		debit += p.Debit
-		credit += p.Credit
+		debit, err = checkedAddCents(debit, p.Debit, "journal debit total")
+		if err != nil {
+			return JournalEntry{}, "", err
+		}
+		credit, err = checkedAddCents(credit, p.Credit, "journal credit total")
+		if err != nil {
+			return JournalEntry{}, "", err
+		}
 	}
 	if debit != credit {
 		return JournalEntry{}, "", appErr(ErrValidation, "journal entry must balance: debit=%d credit=%d", debit, credit)
@@ -627,8 +633,14 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 		if p.Debit == 0 && p.Credit == 0 {
 			return JournalEntry{}, "", appErr(ErrValidation, "posting %d must have a debit or credit", i)
 		}
-		debit += p.Debit
-		credit += p.Credit
+		debit, err = checkedAddCents(debit, p.Debit, "journal debit total")
+		if err != nil {
+			return JournalEntry{}, "", err
+		}
+		credit, err = checkedAddCents(credit, p.Credit, "journal credit total")
+		if err != nil {
+			return JournalEntry{}, "", err
+		}
 	}
 	if debit != credit {
 		return JournalEntry{}, "", appErr(ErrValidation, "journal entry must balance: debit=%d credit=%d", debit, credit)

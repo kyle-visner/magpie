@@ -2,6 +2,7 @@ package magpie
 
 import (
 	"errors"
+	"math"
 	"os"
 	"reflect"
 	"strings"
@@ -125,6 +126,48 @@ func TestLedgerRequiresBalancedJournalEntries(t *testing.T) {
 	}
 	if len(st.JournalEntries) != 0 {
 		t.Fatalf("unbalanced entry was persisted: %#v", st.JournalEntries)
+	}
+}
+
+func TestLedgerRejectsOverflowingJournalTotals(t *testing.T) {
+	s, ctx := newTestStore(t)
+	debit := mustAccount(t, s, ctx, "Overflow Debit", AccountAsset)
+	credit := mustAccount(t, s, ctx, "Overflow Credit", AccountLiability)
+
+	_, _, err := s.CreateJournalEntry(ctx, JournalEntry{
+		Date:         "2026-06-28",
+		Memo:         "Overflowing entry",
+		ManualReason: "regression test for checked cent totals",
+		Postings: []Posting{
+			{AccountID: debit.ID, Debit: math.MaxInt64},
+			{AccountID: debit.ID, Debit: math.MaxInt64},
+			{AccountID: debit.ID, Debit: math.MaxInt64},
+			{AccountID: credit.ID, Credit: math.MaxInt64 - 2},
+		},
+	})
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrValidation || !strings.Contains(app.Message, "journal debit total") {
+		t.Fatalf("expected overflowing debit total validation error, got %#v", err)
+	}
+
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.JournalEntries) != 0 {
+		t.Fatalf("overflowing journal was persisted: %#v", st.JournalEntries)
+	}
+
+	if _, _, err := s.CreateJournalEntry(ctx, JournalEntry{
+		Date:         "2026-06-28",
+		Memo:         "Maximum representable entry",
+		ManualReason: "prove the signed 64-bit boundary remains valid",
+		Postings: []Posting{
+			{AccountID: debit.ID, Debit: math.MaxInt64},
+			{AccountID: credit.ID, Credit: math.MaxInt64},
+		},
+	}); err != nil {
+		t.Fatalf("maximum representable balanced journal failed: %v", err)
 	}
 }
 
@@ -624,6 +667,153 @@ func TestCashBasisInvoicePaidGeneratesRevenueAndTaxWorkflowJournal(t *testing.T)
 	assertPosting(t, entry, cash.ID, 108500, 0)
 	assertPosting(t, entry, revenue.ID, 0, 100000)
 	assertPosting(t, entry, tax.ID, 0, 8500)
+}
+
+func TestInvoiceRejectsOverflowingArithmeticBeforePersistence(t *testing.T) {
+	tests := []struct {
+		name    string
+		invoice func(customer Customer, revenue Account) Invoice
+		want    string
+	}{
+		{
+			name: "line product",
+			invoice: func(customer Customer, revenue Account) Invoice {
+				return Invoice{
+					InvoiceNumber: "INV-OVERFLOW-PRODUCT",
+					CustomerID:    customer.ID,
+					InvoiceDate:   "2026-06-01",
+					LineItems: []InvoiceLineItem{{
+						Description:      "Overflowing product",
+						RevenueAccountID: revenue.ID,
+						Quantity:         2,
+						UnitAmountCents:  math.MaxInt64,
+					}},
+				}
+			},
+			want: "invoice line 0 amount",
+		},
+		{
+			name: "subtotal",
+			invoice: func(customer Customer, revenue Account) Invoice {
+				return Invoice{
+					InvoiceNumber: "INV-OVERFLOW-SUBTOTAL",
+					CustomerID:    customer.ID,
+					InvoiceDate:   "2026-06-01",
+					LineItems: []InvoiceLineItem{
+						{Description: "Maximum line", RevenueAccountID: revenue.ID, Quantity: 1, UnitAmountCents: math.MaxInt64},
+						{Description: "Overflow line", RevenueAccountID: revenue.ID, Quantity: 1, UnitAmountCents: 1},
+					},
+				}
+			},
+			want: "invoice subtotal",
+		},
+		{
+			name: "line tax total",
+			invoice: func(customer Customer, revenue Account) Invoice {
+				return Invoice{
+					InvoiceNumber: "INV-OVERFLOW-LINE-TAX",
+					CustomerID:    customer.ID,
+					InvoiceDate:   "2026-06-01",
+					LineItems: []InvoiceLineItem{
+						{Description: "Maximum tax", RevenueAccountID: revenue.ID, Quantity: 1, UnitAmountCents: 1, TaxAmountCents: math.MaxInt64},
+						{Description: "Overflow tax", RevenueAccountID: revenue.ID, Quantity: 1, UnitAmountCents: 1, TaxAmountCents: 1},
+					},
+				}
+			},
+			want: "invoice line tax total",
+		},
+		{
+			name: "invoice total",
+			invoice: func(customer Customer, revenue Account) Invoice {
+				return Invoice{
+					InvoiceNumber: "INV-OVERFLOW-TOTAL",
+					CustomerID:    customer.ID,
+					InvoiceDate:   "2026-06-01",
+					LineItems: []InvoiceLineItem{{
+						Description:      "Maximum subtotal",
+						RevenueAccountID: revenue.ID,
+						Quantity:         1,
+						UnitAmountCents:  math.MaxInt64,
+						TaxAmountCents:   1,
+					}},
+				}
+			},
+			want: "invoice total",
+		},
+		{
+			name: "payment total",
+			invoice: func(customer Customer, revenue Account) Invoice {
+				return Invoice{
+					InvoiceNumber: "INV-OVERFLOW-PAYMENTS",
+					CustomerID:    customer.ID,
+					InvoiceDate:   "2026-06-01",
+					LineItems: []InvoiceLineItem{{
+						Description:      "Maximum invoice",
+						RevenueAccountID: revenue.ID,
+						Quantity:         1,
+						UnitAmountCents:  math.MaxInt64,
+					}},
+					Payments: []InvoicePayment{
+						{AmountCents: math.MaxInt64},
+						{AmountCents: 1},
+					},
+				}
+			},
+			want: "invoice payment total",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s, ctx := newTestStore(t)
+			revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+			customer, _, err := s.UpsertCustomer(ctx, Customer{Name: "Overflow Customer"})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err = s.CreateInvoice(ctx, test.invoice(customer, revenue))
+			var app *AppError
+			if !errors.As(err, &app) || app.Code != ErrValidation || !strings.Contains(app.Message, test.want) {
+				t.Fatalf("expected %q validation error, got %#v", test.want, err)
+			}
+
+			st, err := s.LoadState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(st.Invoices) != 0 || len(st.JournalEntries) != 0 {
+				t.Fatalf("overflowing invoice data was persisted: invoices=%#v journals=%#v", st.Invoices, st.JournalEntries)
+			}
+		})
+	}
+}
+
+func TestInvoiceAcceptsMaximumRepresentableArithmetic(t *testing.T) {
+	s, ctx := newTestStore(t)
+	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	customer, _, err := s.UpsertCustomer(ctx, Customer{Name: "Maximum Customer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	invoice, _, err := s.CreateInvoice(ctx, Invoice{
+		InvoiceNumber: "INV-MAXIMUM",
+		CustomerID:    customer.ID,
+		InvoiceDate:   "2026-06-01",
+		LineItems: []InvoiceLineItem{{
+			Description:      "Maximum representable line",
+			RevenueAccountID: revenue.ID,
+			Quantity:         1,
+			UnitAmountCents:  math.MaxInt64,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("maximum representable invoice failed: %v", err)
+	}
+	if invoice.SubtotalCents != math.MaxInt64 || invoice.TotalCents != math.MaxInt64 {
+		t.Fatalf("unexpected maximum invoice totals: %#v", invoice)
+	}
 }
 
 func TestAccrualInvoicePostAndPaymentUseAccountsReceivable(t *testing.T) {
