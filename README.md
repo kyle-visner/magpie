@@ -1,14 +1,67 @@
 # Magpie
 
-Magpie is a Phase 1 Go implementation of the PRD in `Magpie_Requirements.md`.
+## TL;DR
 
-It is built around one rule: agents and humans use the same CLI, and the CLI enforces RBAC, ledger invariants, encryption, immutable history, and auditability before data is written.
+Magpie is an opinionated accounting CLI for humans and AI agents. It provides
+one guarded path for chart-of-accounts management, double-entry journals,
+customers, invoices, payouts, notes, snapshots, and audit reads. The CLI checks
+RBAC and accounting invariants before appending an encrypted, immutable event to
+[Jaybase](https://github.com/kyle-visner/jaybase).
+
+Requires Go 1.22 or later:
+
+```sh
+git clone https://github.com/kyle-visner/magpie.git
+cd magpie
+go install ./cmd/magpie
+magpie --store .magpie init
+```
+
+The initialized local book uses `cash` accounting and creates an `owner` actor
+with the `Owner` role. Read [First-Time Setup](#first-time-setup) before adding
+another actor or posting financial activity.
+
+## Who Magpie is for
+
+Magpie is for small teams that want agents to help with bookkeeping without
+giving them raw database access or permission to invent accounting behavior. It
+fits source-document imports, controlled migrations, invoice and payout
+workflows, operational notes, and other jobs where writes must be attributable,
+auditable, safe to retry, and rejected when they violate policy.
+
+Magpie is a CLI and domain engine, not a hosted accounting SaaS or a substitute
+for professional accounting judgment. Use the local backend for development or
+a trusted single-user process. For shared or production use, run Magpie against
+a separately deployed Jaybase service and bind authenticated callers to allowed
+Magpie actor IDs.
+
+## Status and scope
+
+Magpie is pre-1.0. The implemented accounting surface is usable and tested.
+This release includes the capabilities listed below. The following features are
+outside its current scope:
+
+- native QuickBooks CSV, IIF, or QBXML parsing; agents must normalize source
+  data into Magpie's JSON contracts;
+- bills, bank matching or reconciliation, period close, tax, loan, transfer,
+  fixed-asset, retention, garbage-collection, or point-in-time restore commands;
+- note search, backlinks, typed cross-entity references, diff, or graph
+  navigation;
+- a human-oriented output mode, interactive UI, signed command envelopes, or an
+  authentication layer that proves `--actor` identity.
+
+Those are product-scope boundaries, not hidden installation steps. See
+[`docs/SECURITY.md`](docs/SECURITY.md) for additional production controls that
+remain the deployer's responsibility.
 
 ## Project Layout
 
 - The repository root is the accounting CLI project.
-- Jaybase is the extracted AI-native storage project published separately as the private module `github.com/kyle-visner/jaybase`.
-- Magpie depends on Jaybase as a Go module; configure private module access with `GOPRIVATE=github.com/kyle-visner/*` when building from a fresh environment.
+- `cmd/magpie` contains the CLI and `internal/magpie` contains the accounting
+  domain.
+- Jaybase is maintained separately at
+  [`github.com/kyle-visner/jaybase`](https://github.com/kyle-visner/jaybase).
+  Magpie pins it as a Go module dependency.
 
 ## License
 
@@ -17,7 +70,7 @@ AGPL-3.0-or-later. See `LICENSE`.
 ## Current Capabilities
 
 - Canonical CLI in `cmd/magpie` with local embedded and hosted Jaybase backends.
-- Extracted custom immutable Merkle-DAG-style storage with SHA-256-addressed JSON nodes through Jaybase.
+- Append-only, SHA-256-addressed event history through Jaybase.
 - Bearer-authenticated hosted Jaybase access over HTTPS with paginated replay, optimistic concurrency, idempotent writes, and remote named refs.
 - AES-256-GCM encryption for stored node payloads.
 - Unified RBAC for ledger, notes, snapshots, and audit reads.
@@ -33,20 +86,22 @@ AGPL-3.0-or-later. See `LICENSE`.
 - JSON command output by default for agent consumption.
 - Automated tests for business invariants, CLI behavior, and BDD-style core scenarios.
 
-## Build And Verify
+## Build and verify
 
 From the repository root:
 
 ```sh
-go test ./...
+go test -race ./...
+go vet ./...
 go build -o ./magpie ./cmd/magpie
 ```
 
 If your environment blocks the default Go build cache, use a writable cache:
 
 ```sh
-GOPRIVATE=github.com/kyle-visner/* GOCACHE=/private/tmp/magpie-gocache GOMODCACHE=/private/tmp/magpie-gomodcache go test ./...
-GOPRIVATE=github.com/kyle-visner/* GOCACHE=/private/tmp/magpie-gocache GOMODCACHE=/private/tmp/magpie-gomodcache go build -o ./magpie ./cmd/magpie
+GOCACHE=/private/tmp/magpie-gocache go test -race ./...
+GOCACHE=/private/tmp/magpie-gocache go vet ./...
+GOCACHE=/private/tmp/magpie-gocache go build -o ./magpie ./cmd/magpie
 ```
 
 The generated `./magpie` binary is ignored by Git.
@@ -56,18 +111,21 @@ The generated `./magpie` binary is ignored by Git.
 Run the accounting benchmarks from this repository. Run Jaybase benchmarks from the separate Jaybase repository.
 
 ```sh
-GOPRIVATE=github.com/kyle-visner/* GOCACHE=/private/tmp/magpie-gocache GOMODCACHE=/private/tmp/magpie-gomodcache go test -run '^$' -bench . -benchmem ./...
+GOCACHE=/private/tmp/magpie-gocache go test -run '^$' -bench . -benchmem ./...
 ```
 
 For baseline comparisons, capture multiple runs and compare them with `benchstat`:
 
 ```sh
 mkdir -p .benchmarks
-GOPRIVATE=github.com/kyle-visner/* GOCACHE=/private/tmp/magpie-gocache GOMODCACHE=/private/tmp/magpie-gomodcache go test -run '^$' -bench . -benchmem -count 5 ./... > .benchmarks/magpie-main.txt
+GOCACHE=/private/tmp/magpie-gocache go test -run '^$' -bench . -benchmem -count 5 ./... > .benchmarks/magpie-main.txt
 benchstat .benchmarks/magpie-main.txt .benchmarks/magpie-feature.txt
 ```
 
 ## Agent Integration Pattern
+
+Agents should read [`llm.md`](llm.md) as their operating contract. The short
+pattern below shows the required invocation shape.
 
 Give your agent a fixed command template and tell it to parse stdout as JSON:
 
@@ -905,3 +963,11 @@ and never pass it on the command line. Local production deployments should
 provide `JAYBASE_DATA_KEY` from a managed secret store or KMS and keep local key
 files out of backups. Hosted deployments manage the data key and encrypted
 backups on the Jaybase server instead.
+
+## Contributing
+
+Run the release checks in [Build and verify](#build-and-verify) before opening a
+change. Bug reports and focused proposals are welcome in
+[GitHub Issues](https://github.com/kyle-visner/magpie/issues). Review
+[`docs/SECURITY.md`](docs/SECURITY.md) before production use, and do not put
+credentials or confidential financial data in a public issue.
