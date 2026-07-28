@@ -4,6 +4,8 @@
 
 # Magpie
 
+[![CI](https://github.com/kyle-visner/magpie/actions/workflows/ci.yml/badge.svg)](https://github.com/kyle-visner/magpie/actions/workflows/ci.yml)
+
 ## TL;DR
 
 Magpie is an opinionated accounting CLI for humans and AI agents. It provides
@@ -12,7 +14,8 @@ customers, invoices, payouts, notes, snapshots, and audit reads. The CLI checks
 RBAC and accounting invariants before appending an encrypted, immutable event to
 [Jaybase](https://github.com/kyle-visner/jaybase).
 
-Requires Go 1.22 or later:
+Requires Go 1.26.5 or later. Earlier Go releases include known standard-library
+vulnerabilities and must not be used to build release binaries:
 
 ```sh
 git clone https://github.com/kyle-visner/magpie.git
@@ -92,23 +95,33 @@ AGPL-3.0-or-later. See `LICENSE`.
 
 ## Build and verify
 
-From the repository root:
+Use Go 1.26.5 or later. From the repository root:
 
 ```sh
+go mod verify
 go test -race ./...
 go vet ./...
 go build -o ./magpie ./cmd/magpie
+go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+govulncheck ./...
 ```
 
 If your environment blocks the default Go build cache, use a writable cache:
 
 ```sh
+GOCACHE=/private/tmp/magpie-gocache go mod verify
 GOCACHE=/private/tmp/magpie-gocache go test -race ./...
 GOCACHE=/private/tmp/magpie-gocache go vet ./...
 GOCACHE=/private/tmp/magpie-gocache go build -o ./magpie ./cmd/magpie
 ```
 
 The generated `./magpie` binary is ignored by Git.
+
+Tagged releases are built from clean `main` commits by
+[`release.yml`](.github/workflows/release.yml) using the reproducible
+[`scripts/build-release.sh`](scripts/build-release.sh) process. Each GitHub
+Release includes macOS and Linux archives for amd64 and arm64 plus a
+`SHA256SUMS` file.
 
 ## Performance Benchmarks
 
