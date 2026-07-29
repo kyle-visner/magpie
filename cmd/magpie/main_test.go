@@ -379,6 +379,31 @@ func TestCLIFixedAssetWorkflow(t *testing.T) {
 	if schedule["net_book_value_cents"] != float64(90000) {
 		t.Fatalf("unexpected fixed asset schedule: %#v", schedule)
 	}
+
+	out.Reset()
+	if err := run([]string{"--store", dir, "fixed-asset", "get", "--asset-id", assetID}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var fetched map[string]any
+	if err := json.Unmarshal(out.Bytes(), &fetched); err != nil {
+		t.Fatal(err)
+	}
+	if fetched["id"] != assetID || fetched["name"] != "Production laptop" {
+		t.Fatalf("unexpected fixed asset get response: %#v", fetched)
+	}
+
+	out.Reset()
+	if err := run([]string{"--store", dir, "fixed-asset", "list"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var listed map[string]any
+	if err := json.Unmarshal(out.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	listedAsset, ok := listed[assetID].(map[string]any)
+	if !ok || listedAsset["name"] != "Production laptop" {
+		t.Fatalf("expected acquired asset in list response: %#v", listed)
+	}
 }
 
 func TestCLIUpdatesExistingAccountExternalRefMetadata(t *testing.T) {

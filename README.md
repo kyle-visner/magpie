@@ -360,6 +360,8 @@ Magpie provides a first-class fixed-asset register for `modified_cash` and `accr
 
 This is a book-accounting workflow, not a tax-depreciation calculator. Magpie does not choose or calculate Section 179, bonus depreciation, MACRS, tax basis, impairment, or disposal treatment. Get professional review when book and tax treatment may differ.
 
+The depreciable basis (`cost_cents - salvage_value_cents`) must be at least the useful life in months so every monthly posting is at least one cent. Modified-cash books must also have `capitalize_fixed_assets` enabled in their active policy. Once a fixed-asset register record exists, Magpie will not allow the book's accounting basis to change.
+
 Configure accounts with the required roles:
 
 - `fixed_asset` on the capitalized asset account.
@@ -416,6 +418,8 @@ Post every due, closed monthly period through a date:
 ```
 
 Each period debits depreciation expense and credits accumulated depreciation. Repeating the same command does not create duplicate journals. Use `fixed-asset get` and `fixed-asset list` to inspect register records.
+
+Acquisition uses a recoverable multi-event workflow: register creation, the acquisition journal, and the journal link are appended in order. If a storage conflict or interruption leaves an acquisition incomplete, rerun the identical `fixed-asset acquire-json` command. Stable IDs and source keys resume the workflow without duplicating the asset or journal, and depreciation remains blocked until acquisition is complete.
 
 ## Ledger Workflow
 

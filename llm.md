@@ -180,7 +180,10 @@ Fixed-asset acquisition and depreciation are available only for
 `accumulated_depreciation`, and `depreciation_expense` roles before acquiring
 an asset. Magpie supports straight-line book depreciation with a full-month
 convention and posts only closed monthly periods. It allocates cents exactly
-and uses stable source keys for idempotency.
+and uses stable source keys for idempotency. Modified-cash books must have
+`capitalize_fixed_assets` enabled. The depreciable basis must provide at least
+one cent per useful-life month. If acquisition is interrupted, rerun the
+identical `fixed-asset acquire-json` command; do not create a manual journal.
 
 Do not use this workflow to infer tax treatment. It does not calculate Section
 179, bonus depreciation, MACRS, tax basis, impairment, or disposal. If the

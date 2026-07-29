@@ -118,6 +118,9 @@ func (s *Store) DepreciateFixedAsset(ctx Context, assetID, throughDate string) (
 		return FixedAssetDepreciationResult{}, "", err
 	}
 	assetID = strings.TrimSpace(assetID)
+	if assetID == "" {
+		return FixedAssetDepreciationResult{}, "", appErr(ErrValidation, "fixed asset id is required")
+	}
 	asset, ok := st.FixedAssets[assetID]
 	if !ok {
 		return FixedAssetDepreciationResult{}, "", appErr(ErrNotFound, "fixed asset %s not found", assetID)
@@ -220,9 +223,13 @@ func (s *Store) FixedAssetSchedule(ctx Context, assetID, asOfDate string) (Fixed
 	if err := EnsurePermission(st, ctx, PermissionLedgerRead); err != nil {
 		return FixedAssetSchedule{}, err
 	}
-	asset, ok := st.FixedAssets[strings.TrimSpace(assetID)]
+	assetID = strings.TrimSpace(assetID)
+	if assetID == "" {
+		return FixedAssetSchedule{}, appErr(ErrValidation, "fixed asset id is required")
+	}
+	asset, ok := st.FixedAssets[assetID]
 	if !ok {
-		return FixedAssetSchedule{}, appErr(ErrNotFound, "fixed asset %s not found", strings.TrimSpace(assetID))
+		return FixedAssetSchedule{}, appErr(ErrNotFound, "fixed asset %s not found", assetID)
 	}
 	var asOf time.Time
 	if strings.TrimSpace(asOfDate) == "" {
@@ -232,13 +239,20 @@ func (s *Store) FixedAssetSchedule(ctx Context, assetID, asOfDate string) (Fixed
 		if err != nil {
 			return FixedAssetSchedule{}, err
 		}
+		if asOf.After(s.now().UTC()) {
+			return FixedAssetSchedule{}, appErr(ErrValidation, "as-of date cannot be in the future")
+		}
 	}
 	return buildFixedAssetSchedule(asset, asOf, st)
 }
 
 func normalizeFixedAsset(st State, asset FixedAsset, now time.Time) (FixedAsset, error) {
-	if basis := st.effectiveSettings().AccountingBasis; basis == AccountingBasisCash {
+	settings := st.effectiveSettings()
+	if settings.AccountingBasis == AccountingBasisCash {
 		return FixedAsset{}, appErr(ErrValidation, "fixed asset depreciation requires modified_cash or accrual accounting; cash-basis books expense purchases when paid")
+	}
+	if settings.AccountingBasis == AccountingBasisModifiedCash && !settings.ModifiedCashPolicy.CapitalizeFixedAssets {
+		return FixedAsset{}, appErr(ErrValidation, "modified-cash policy does not permit fixed asset capitalization")
 	}
 	asset.ID = strings.TrimSpace(asset.ID)
 	asset.Name = strings.TrimSpace(asset.Name)
@@ -282,6 +296,9 @@ func normalizeFixedAsset(st State, asset FixedAsset, now time.Time) (FixedAsset,
 	}
 	if asset.UsefulLifeMonths < 1 || asset.UsefulLifeMonths > 1200 {
 		return FixedAsset{}, appErr(ErrValidation, "useful life must be between 1 and 1200 months")
+	}
+	if asset.CostCents-asset.SalvageValueCents < int64(asset.UsefulLifeMonths) {
+		return FixedAsset{}, appErr(ErrValidation, "depreciable basis must provide at least one cent per useful-life month; reduce useful life or expense the purchase")
 	}
 	if asset.DepreciationMethod == "" {
 		asset.DepreciationMethod = DepreciationMethodStraightLine
