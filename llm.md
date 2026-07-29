@@ -150,6 +150,9 @@ command list; use this guide and the README for command-specific contracts.
   Display names and chart numbers are not semantic contracts.
 - Never change the book's accounting basis per transaction.
 - Prefer first-class invoice and payout commands for ordinary activity.
+- Use the first-class fixed-asset workflow for capitalized purchases and book
+  depreciation. Do not create manual depreciation journals when the asset is in
+  Magpie's fixed-asset register.
 - Generic `ledger journal create` is a privileged manual adjustment or import
   path. It requires `ledger:write`, `journal:adjust`, a balanced entry, and a
   nonempty `manual_reason`.
@@ -171,6 +174,21 @@ Use an account with `operating_cash` or `bank_account` for invoice payments.
 Invoice lines require revenue accounts with an allowed revenue role. Accrual
 invoices require `accounts_receivable`; taxable invoices require
 `sales_tax_payable`.
+
+Fixed-asset acquisition and depreciation are available only for
+`modified_cash` and `accrual` books. Resolve accounts with `fixed_asset`,
+`accumulated_depreciation`, and `depreciation_expense` roles before acquiring
+an asset. Magpie supports straight-line book depreciation with a full-month
+convention and posts only closed monthly periods. It allocates cents exactly
+and uses stable source keys for idempotency. Modified-cash books must have
+`capitalize_fixed_assets` enabled. The depreciable basis must provide at least
+one cent per useful-life month. If acquisition is interrupted, rerun the
+identical `fixed-asset acquire-json` command; do not create a manual journal.
+
+Do not use this workflow to infer tax treatment. It does not calculate Section
+179, bonus depreciation, MACRS, tax basis, impairment, or disposal. If the
+method, useful life, salvage value, placed-in-service date, capitalization
+decision, or book-versus-tax treatment is uncertain, stop for human review.
 
 ## Safe source-document workflow
 
@@ -257,6 +275,11 @@ invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --
 invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
 invoice get --invoice-id ID
 invoice list
+fixed-asset acquire-json --file asset.json
+fixed-asset depreciate --asset-id ID --through-date YYYY-MM-DD
+fixed-asset schedule --asset-id ID [--as-of-date YYYY-MM-DD]
+fixed-asset get --asset-id ID
+fixed-asset list
 payout import-json --file payout.json
 payout get --payout-id ID
 payout list

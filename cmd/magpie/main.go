@@ -100,6 +100,8 @@ func run(args []string, out io.Writer) error {
 		return a.invoice(rest[1:], out)
 	case "payout":
 		return a.payout(rest[1:], out)
+	case "fixed-asset":
+		return a.fixedAsset(rest[1:], out)
 	case "ledger":
 		return a.ledger(rest[1:], out)
 	case "note":
@@ -108,6 +110,75 @@ func run(args []string, out io.Writer) error {
 		return a.snapshot(rest[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q", rest[0])
+	}
+}
+
+func (a app) fixedAsset(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("fixed-asset command required")
+	}
+	switch args[0] {
+	case "acquire-json":
+		fs := newFlagSet("fixed-asset acquire-json")
+		file := fs.String("file", "", "JSON file with a fixed asset acquisition; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var asset magpie.FixedAsset
+		if err := readJSONFile(*file, &asset); err != nil {
+			return err
+		}
+		acquired, root, err := a.store.AcquireFixedAsset(a.ctx, asset)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "asset": acquired})
+	case "depreciate":
+		fs := newFlagSet("fixed-asset depreciate")
+		assetID := fs.String("asset-id", "", "fixed asset id")
+		throughDate := fs.String("through-date", "", "post all closed monthly periods through YYYY-MM-DD")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, root, err := a.store.DepreciateFixedAsset(a.ctx, *assetID, *throughDate)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "result": result})
+	case "schedule":
+		fs := newFlagSet("fixed-asset schedule")
+		assetID := fs.String("asset-id", "", "fixed asset id")
+		asOfDate := fs.String("as-of-date", "", "schedule status date in YYYY-MM-DD; defaults to today")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		schedule, err := a.store.FixedAssetSchedule(a.ctx, *assetID, *asOfDate)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, schedule)
+	case "get":
+		fs := newFlagSet("fixed-asset get")
+		assetID := fs.String("asset-id", "", "fixed asset id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		asset, err := a.store.GetFixedAsset(a.ctx, *assetID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, asset)
+	case "list":
+		st, err := a.store.LoadState()
+		if err != nil {
+			return err
+		}
+		if err := magpie.EnsurePermission(st, a.ctx, magpie.PermissionLedgerRead); err != nil {
+			return err
+		}
+		return writeJSON(out, st.FixedAssets)
+	default:
+		return fmt.Errorf("unknown fixed-asset command %q", args[0])
 	}
 }
 
@@ -691,6 +762,11 @@ Commands:
   invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
   invoice get --invoice-id ID
   invoice list
+  fixed-asset acquire-json --file asset.json
+  fixed-asset depreciate --asset-id ID --through-date YYYY-MM-DD
+  fixed-asset schedule --asset-id ID [--as-of-date YYYY-MM-DD]
+  fixed-asset get --asset-id ID
+  fixed-asset list
   payout import-json --file payout.json
   payout get --payout-id ID
   payout list

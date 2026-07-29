@@ -198,6 +198,70 @@ type Payout struct {
 	UpdatedBy            string              `json:"updated_by"`
 }
 
+type DepreciationMethod string
+
+const (
+	DepreciationMethodStraightLine DepreciationMethod = "straight_line"
+)
+
+type DepreciationConvention string
+
+const (
+	DepreciationConventionFullMonth DepreciationConvention = "full_month"
+)
+
+type FixedAsset struct {
+	ID                               string                 `json:"id"`
+	Name                             string                 `json:"name"`
+	Description                      string                 `json:"description,omitempty"`
+	AcquisitionDate                  string                 `json:"acquisition_date"`
+	PlacedInServiceDate              string                 `json:"placed_in_service_date"`
+	CostCents                        int64                  `json:"cost_cents"`
+	SalvageValueCents                int64                  `json:"salvage_value_cents,omitempty"`
+	UsefulLifeMonths                 int                    `json:"useful_life_months"`
+	DepreciationMethod               DepreciationMethod     `json:"depreciation_method"`
+	DepreciationConvention           DepreciationConvention `json:"depreciation_convention"`
+	FixedAssetAccountID              string                 `json:"fixed_asset_account_id"`
+	AccumulatedDepreciationAccountID string                 `json:"accumulated_depreciation_account_id"`
+	DepreciationExpenseAccountID     string                 `json:"depreciation_expense_account_id"`
+	FundingAccountID                 string                 `json:"funding_account_id"`
+	AcquisitionJournalEntryID        string                 `json:"acquisition_journal_entry_id,omitempty"`
+	DepreciationJournalEntryIDs      []string               `json:"depreciation_journal_entry_ids,omitempty"`
+	ExternalRefs                     []ExternalSourceRef    `json:"external_refs,omitempty"`
+	CreatedAt                        time.Time              `json:"created_at"`
+	UpdatedAt                        time.Time              `json:"updated_at"`
+	CreatedBy                        string                 `json:"created_by"`
+	UpdatedBy                        string                 `json:"updated_by"`
+}
+
+type DepreciationSchedulePeriod struct {
+	Period         int    `json:"period"`
+	Date           string `json:"date"`
+	AmountCents    int64  `json:"amount_cents"`
+	Status         string `json:"status"`
+	JournalEntryID string `json:"journal_entry_id,omitempty"`
+}
+
+type FixedAssetSchedule struct {
+	AssetID                      string                       `json:"asset_id"`
+	AsOfDate                     string                       `json:"as_of_date"`
+	CostCents                    int64                        `json:"cost_cents"`
+	SalvageValueCents            int64                        `json:"salvage_value_cents"`
+	DepreciableBasisCents        int64                        `json:"depreciable_basis_cents"`
+	AccumulatedDepreciationCents int64                        `json:"accumulated_depreciation_cents"`
+	NetBookValueCents            int64                        `json:"net_book_value_cents"`
+	Periods                      []DepreciationSchedulePeriod `json:"periods"`
+}
+
+type FixedAssetDepreciationResult struct {
+	Asset                FixedAsset     `json:"asset"`
+	PostedJournalEntries []JournalEntry `json:"posted_journal_entries"`
+	AlreadyPostedPeriods int            `json:"already_posted_periods"`
+	RemainingPeriods     int            `json:"remaining_periods"`
+	AccumulatedCents     int64          `json:"accumulated_depreciation_cents"`
+	NetBookValueCents    int64          `json:"net_book_value_cents"`
+}
+
 type Account struct {
 	ID           string              `json:"id"`
 	Number       string              `json:"number,omitempty"`
@@ -267,6 +331,7 @@ type State struct {
 	Customers      map[string]Customer     `json:"customers"`
 	Invoices       map[string]Invoice      `json:"invoices"`
 	Payouts        map[string]Payout       `json:"payouts"`
+	FixedAssets    map[string]FixedAsset   `json:"fixed_assets"`
 	Notes          map[string]Note         `json:"notes"`
 	SourceKeys     map[string]string       `json:"source_keys"`
 	Root           string                  `json:"root,omitempty"`
@@ -282,6 +347,7 @@ func emptyState() State {
 		Customers:      map[string]Customer{},
 		Invoices:       map[string]Invoice{},
 		Payouts:        map[string]Payout{},
+		FixedAssets:    map[string]FixedAsset{},
 		Notes:          map[string]Note{},
 		SourceKeys:     map[string]string{},
 	}

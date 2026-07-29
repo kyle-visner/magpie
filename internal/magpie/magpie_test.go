@@ -1352,6 +1352,313 @@ func TestPayoutImportRequiresDestinationAndFeeRoles(t *testing.T) {
 	}
 }
 
+func TestFixedAssetWorkflowAcquiresAndPostsStraightLineDepreciation(t *testing.T) {
+	s, ctx := newTestStore(t)
+	if _, _, err := s.SetAccountingBasis(ctx, AccountingBasisModifiedCash); err != nil {
+		t.Fatal(err)
+	}
+	fixed := mustRoleAccount(t, s, ctx, "1500", "Equipment", AccountAsset, AccountRoleFixedAsset)
+	accumulated := mustRoleAccount(t, s, ctx, "1590", "Accumulated Depreciation", AccountAsset, AccountRoleAccumulatedDepreciation)
+	expense := mustRoleAccount(t, s, ctx, "6500", "Depreciation Expense", AccountExpense, AccountRoleDepreciationExpense)
+	bank := mustRoleAccount(t, s, ctx, "1010", "Operating Bank", AccountAsset, AccountRoleBankAccount)
+
+	acquired, _, err := s.AcquireFixedAsset(ctx, FixedAsset{
+		Name:                             "Production laptop",
+		AcquisitionDate:                  "2026-03-10",
+		PlacedInServiceDate:              "2026-03-15",
+		CostCents:                        120005,
+		UsefulLifeMonths:                 12,
+		FixedAssetAccountID:              fixed.ID,
+		AccumulatedDepreciationAccountID: accumulated.ID,
+		DepreciationExpenseAccountID:     expense.ID,
+		FundingAccountID:                 bank.ID,
+		ExternalRefs: []ExternalSourceRef{{
+			SourceSystem: "merchant",
+			ExternalID:   "purchase-1001",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acquired.DepreciationMethod != DepreciationMethodStraightLine ||
+		acquired.DepreciationConvention != DepreciationConventionFullMonth ||
+		acquired.AcquisitionJournalEntryID == "" {
+		t.Fatalf("unexpected fixed asset defaults: %#v", acquired)
+	}
+
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	acquisition := st.JournalEntries[acquired.AcquisitionJournalEntryID]
+	if acquisition.Workflow != "fixed_asset.acquire" ||
+		acquisition.PostingSemantics != "fixed_asset_capitalized" ||
+		acquisition.SourceDocumentID != acquired.ID {
+		t.Fatalf("unexpected acquisition journal metadata: %#v", acquisition)
+	}
+	assertPosting(t, acquisition, fixed.ID, 120005, 0)
+	assertPosting(t, acquisition, bank.ID, 0, 120005)
+
+	result, root, err := s.DepreciateFixedAsset(ctx, acquired.ID, "2026-05-31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.PostedJournalEntries) != 3 ||
+		result.AlreadyPostedPeriods != 0 ||
+		result.AccumulatedCents != 30003 ||
+		result.NetBookValueCents != 90002 {
+		t.Fatalf("unexpected depreciation result: %#v", result)
+	}
+	for i, entry := range result.PostedJournalEntries {
+		if entry.Workflow != "fixed_asset.depreciate" ||
+			entry.PostingSemantics != "straight_line_monthly_depreciation" ||
+			entry.SourceDocumentID != acquired.ID ||
+			entry.Date != []string{"2026-03-31", "2026-04-30", "2026-05-31"}[i] {
+			t.Fatalf("unexpected depreciation journal %d: %#v", i, entry)
+		}
+		assertPosting(t, entry, expense.ID, 10001, 0)
+		assertPosting(t, entry, accumulated.ID, 0, 10001)
+	}
+
+	replayed, secondRoot, err := s.DepreciateFixedAsset(ctx, acquired.ID, "2026-05-31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondRoot != root || len(replayed.PostedJournalEntries) != 0 || replayed.AlreadyPostedPeriods != 3 {
+		t.Fatalf("expected idempotent depreciation replay, result=%#v root=%s secondRoot=%s", replayed, root, secondRoot)
+	}
+
+	schedule, err := s.FixedAssetSchedule(ctx, acquired.ID, "2026-06-28")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scheduledTotal int64
+	for _, period := range schedule.Periods {
+		scheduledTotal += period.AmountCents
+	}
+	if len(schedule.Periods) != 12 || scheduledTotal != 120005 {
+		t.Fatalf("expected exact cent allocation across useful life, schedule=%#v", schedule)
+	}
+}
+
+func TestFixedAssetWorkflowEnforcesBookBasisRolesAndClosedPeriods(t *testing.T) {
+	s, ctx := newTestStore(t)
+	fixed := mustRoleAccount(t, s, ctx, "1500", "Equipment", AccountAsset, AccountRoleFixedAsset)
+	accumulated := mustRoleAccount(t, s, ctx, "1590", "Accumulated Depreciation", AccountAsset, AccountRoleAccumulatedDepreciation)
+	expense := mustRoleAccount(t, s, ctx, "6500", "Depreciation Expense", AccountExpense, AccountRoleDepreciationExpense)
+	bank := mustRoleAccount(t, s, ctx, "1010", "Operating Bank", AccountAsset, AccountRoleBankAccount)
+	request := FixedAsset{
+		Name:                             "Camera",
+		AcquisitionDate:                  "2026-04-01",
+		PlacedInServiceDate:              "2026-04-15",
+		CostCents:                        360000,
+		UsefulLifeMonths:                 36,
+		FixedAssetAccountID:              fixed.ID,
+		AccumulatedDepreciationAccountID: accumulated.ID,
+		DepreciationExpenseAccountID:     expense.ID,
+		FundingAccountID:                 bank.ID,
+	}
+
+	_, _, err := s.AcquireFixedAsset(ctx, request)
+	if err == nil || !strings.Contains(err.Error(), "requires modified_cash or accrual") {
+		t.Fatalf("expected cash-basis acquisition rejection, got %v", err)
+	}
+	if _, _, err := s.SetAccountingBasis(ctx, AccountingBasisAccrual); err != nil {
+		t.Fatal(err)
+	}
+	request.DepreciationExpenseAccountID = bank.ID
+	_, _, err = s.AcquireFixedAsset(ctx, request)
+	if err == nil || !strings.Contains(err.Error(), "depreciation expense account") {
+		t.Fatalf("expected depreciation account role rejection, got %v", err)
+	}
+	request.DepreciationExpenseAccountID = expense.ID
+	request.CostCents = 1
+	request.UsefulLifeMonths = 2
+	_, _, err = s.AcquireFixedAsset(ctx, request)
+	if err == nil || !strings.Contains(err.Error(), "at least one cent") {
+		t.Fatalf("expected zero-cent monthly period rejection, got %v", err)
+	}
+	request.CostCents = 360000
+	request.UsefulLifeMonths = 36
+	asset, _, err := s.AcquireFixedAsset(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := s.DepreciateFixedAsset(ctx, asset.ID, "2026-06-28")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.PostedJournalEntries) != 2 {
+		t.Fatalf("expected only April and May closed periods, got %#v", result)
+	}
+	_, err = s.FixedAssetSchedule(ctx, asset.ID, "2026-06-29")
+	if err == nil || !strings.Contains(err.Error(), "cannot be in the future") {
+		t.Fatalf("expected future as-of-date rejection, got %v", err)
+	}
+	_, err = s.FixedAssetSchedule(ctx, " ", "2026-06-28")
+	if err == nil || !strings.Contains(err.Error(), "id is required") {
+		t.Fatalf("expected blank schedule asset id validation, got %v", err)
+	}
+	_, _, err = s.DepreciateFixedAsset(ctx, " ", "2026-06-28")
+	if err == nil || !strings.Contains(err.Error(), "id is required") {
+		t.Fatalf("expected blank depreciation asset id validation, got %v", err)
+	}
+	_, _, err = s.DepreciateFixedAsset(ctx, asset.ID, "2026-06-29")
+	if err == nil || !strings.Contains(err.Error(), "cannot be in the future") {
+		t.Fatalf("expected future through-date rejection, got %v", err)
+	}
+}
+
+func TestFixedAssetWorkflowReachesPositiveSalvageValue(t *testing.T) {
+	s, ctx := newTestStore(t)
+	if _, _, err := s.SetAccountingBasis(ctx, AccountingBasisModifiedCash); err != nil {
+		t.Fatal(err)
+	}
+	fixed := mustRoleAccount(t, s, ctx, "1500", "Equipment", AccountAsset, AccountRoleFixedAsset)
+	accumulated := mustRoleAccount(t, s, ctx, "1590", "Accumulated Depreciation", AccountAsset, AccountRoleAccumulatedDepreciation)
+	expense := mustRoleAccount(t, s, ctx, "6500", "Depreciation Expense", AccountExpense, AccountRoleDepreciationExpense)
+	bank := mustRoleAccount(t, s, ctx, "1010", "Operating Bank", AccountAsset, AccountRoleBankAccount)
+	asset, _, err := s.AcquireFixedAsset(ctx, FixedAsset{
+		Name:                             "Salvage test asset",
+		AcquisitionDate:                  "2026-03-01",
+		PlacedInServiceDate:              "2026-03-01",
+		CostCents:                        120010,
+		SalvageValueCents:                7,
+		UsefulLifeMonths:                 12,
+		FixedAssetAccountID:              fixed.ID,
+		AccumulatedDepreciationAccountID: accumulated.ID,
+		DepreciationExpenseAccountID:     expense.ID,
+		FundingAccountID:                 bank.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, _, err := s.DepreciateFixedAsset(ctx, asset.ID, "2026-05-31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial.AccumulatedCents != 30003 || partial.NetBookValueCents != 90007 {
+		t.Fatalf("unexpected partial salvage schedule: %#v", partial)
+	}
+
+	s.now = func() time.Time { return time.Date(2027, 3, 1, 12, 0, 0, 0, time.UTC) }
+	full, _, err := s.DepreciateFixedAsset(ctx, asset.ID, "2027-02-28")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.AccumulatedCents != 120003 || full.NetBookValueCents != 7 {
+		t.Fatalf("expected final net book value to equal salvage, got %#v", full)
+	}
+	schedule, err := s.FixedAssetSchedule(ctx, asset.ID, "2027-02-28")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, period := range schedule.Periods {
+		total += period.AmountCents
+	}
+	if total != asset.CostCents-asset.SalvageValueCents {
+		t.Fatalf("expected schedule total %d, got %d", asset.CostCents-asset.SalvageValueCents, total)
+	}
+}
+
+func TestFixedAssetWorkflowHonorsModifiedCashPolicy(t *testing.T) {
+	s, ctx := newTestStore(t)
+	settings, _, err := s.SetAccountingBasis(ctx, AccountingBasisModifiedCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.ModifiedCashPolicy.CapitalizeFixedAssets = false
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.appendEventAt(ctx, "book.settings", "book:settings", "test disable capitalization", wrapEvent("settings.update", settingsUpdatePayload{Settings: settings}), st.Root); err != nil {
+		t.Fatal(err)
+	}
+	fixed := mustRoleAccount(t, s, ctx, "1500", "Equipment", AccountAsset, AccountRoleFixedAsset)
+	accumulated := mustRoleAccount(t, s, ctx, "1590", "Accumulated Depreciation", AccountAsset, AccountRoleAccumulatedDepreciation)
+	expense := mustRoleAccount(t, s, ctx, "6500", "Depreciation Expense", AccountExpense, AccountRoleDepreciationExpense)
+	bank := mustRoleAccount(t, s, ctx, "1010", "Operating Bank", AccountAsset, AccountRoleBankAccount)
+	_, _, err = s.AcquireFixedAsset(ctx, FixedAsset{
+		Name:                             "Policy test asset",
+		AcquisitionDate:                  "2026-04-01",
+		PlacedInServiceDate:              "2026-04-01",
+		CostCents:                        120000,
+		UsefulLifeMonths:                 12,
+		FixedAssetAccountID:              fixed.ID,
+		AccumulatedDepreciationAccountID: accumulated.ID,
+		DepreciationExpenseAccountID:     expense.ID,
+		FundingAccountID:                 bank.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not permit") {
+		t.Fatalf("expected modified-cash capitalization policy rejection, got %v", err)
+	}
+}
+
+func TestAccountingBasisCannotChangeWithIncompleteFixedAsset(t *testing.T) {
+	s, ctx := newTestStore(t)
+	if _, _, err := s.SetAccountingBasis(ctx, AccountingBasisModifiedCash); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := FixedAsset{ID: "asset:incomplete", Name: "Incomplete acquisition"}
+	if _, err := s.appendEventAt(ctx, "fixed_asset", asset.ID, "test incomplete acquisition", wrapEvent("fixed_asset.create", fixedAssetCreatePayload{Asset: asset}), st.Root); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = s.SetAccountingBasis(ctx, AccountingBasisCash)
+	if err == nil || !strings.Contains(err.Error(), "fixed assets exist") {
+		t.Fatalf("expected basis change rejection for incomplete fixed asset, got %v", err)
+	}
+}
+
+func TestFixedAssetScheduleRejectsSpoofedDepreciationSourceKey(t *testing.T) {
+	s, ctx := newTestStore(t)
+	if _, _, err := s.SetAccountingBasis(ctx, AccountingBasisModifiedCash); err != nil {
+		t.Fatal(err)
+	}
+	fixed := mustRoleAccount(t, s, ctx, "1500", "Equipment", AccountAsset, AccountRoleFixedAsset)
+	accumulated := mustRoleAccount(t, s, ctx, "1590", "Accumulated Depreciation", AccountAsset, AccountRoleAccumulatedDepreciation)
+	expense := mustRoleAccount(t, s, ctx, "6500", "Depreciation Expense", AccountExpense, AccountRoleDepreciationExpense)
+	bank := mustRoleAccount(t, s, ctx, "1010", "Operating Bank", AccountAsset, AccountRoleBankAccount)
+	asset, _, err := s.AcquireFixedAsset(ctx, FixedAsset{
+		Name:                             "Printer",
+		AcquisitionDate:                  "2026-04-01",
+		PlacedInServiceDate:              "2026-04-01",
+		CostCents:                        120000,
+		UsefulLifeMonths:                 12,
+		FixedAssetAccountID:              fixed.ID,
+		AccumulatedDepreciationAccountID: accumulated.ID,
+		DepreciationExpenseAccountID:     expense.ID,
+		FundingAccountID:                 bank.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = s.CreateJournalEntry(ctx, JournalEntry{
+		Date:         "2026-04-30",
+		Memo:         "Spoofed depreciation",
+		ManualReason: "exercise source-key integrity guard",
+		Source:       "fixed_asset",
+		SourceKey:    asset.ID + ":depreciation:0001",
+		Postings: []Posting{
+			{AccountID: expense.ID, Debit: 9999},
+			{AccountID: accumulated.ID, Credit: 9999},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.FixedAssetSchedule(ctx, asset.ID, "2026-04-30")
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrIntegrity {
+		t.Fatalf("expected spoofed source key to fail integrity validation, got %#v", err)
+	}
+}
+
 func TestExternalInvoiceImportInfersTaxFromLineItems(t *testing.T) {
 	s, ctx := newTestStore(t)
 	revenue := mustRoleAccount(t, s, ctx, "4000", "Service Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)

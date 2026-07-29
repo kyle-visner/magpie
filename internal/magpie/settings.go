@@ -56,8 +56,8 @@ func (s *Store) SetAccountingBasis(ctx Context, basis AccountingBasis) (BookSett
 	if settings.AccountingBasis == normalized {
 		return settings, st.Root, nil
 	}
-	if len(st.JournalEntries) > 0 {
-		return BookSettings{}, "", appErr(ErrValidation, "accounting basis cannot be changed after journal entries exist")
+	if len(st.JournalEntries) > 0 || len(st.FixedAssets) > 0 {
+		return BookSettings{}, "", appErr(ErrValidation, "accounting basis cannot be changed after journal entries or fixed assets exist")
 	}
 	settings.AccountingBasis = normalized
 	settings.ModifiedCashPolicy = DefaultModifiedCashPolicy()
