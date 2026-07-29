@@ -348,6 +348,75 @@ For vendor bills:
 
 Magpie prevents ordinary agents from bypassing these rules with generic manual journals, and invoice workflows enforce the A/R versus cash-basis posting semantics directly.
 
+## Fixed Assets And Book Depreciation
+
+Magpie provides a first-class fixed-asset register for `modified_cash` and `accrual` books. The workflow is deliberately narrow and reviewable:
+
+- Straight-line book depreciation only.
+- A full-month convention: depreciation begins on the last day of the placed-in-service month.
+- Monthly postings only after a month has closed.
+- Exact cent allocation across the useful life; the final schedule always reaches the stated salvage value.
+- Stable source keys make acquisition and monthly depreciation postings idempotent.
+
+This is a book-accounting workflow, not a tax-depreciation calculator. Magpie does not choose or calculate Section 179, bonus depreciation, MACRS, tax basis, impairment, or disposal treatment. Get professional review when book and tax treatment may differ.
+
+Configure accounts with the required roles:
+
+- `fixed_asset` on the capitalized asset account.
+- `accumulated_depreciation` on the contra-asset account.
+- `depreciation_expense` on the expense account.
+- An asset or liability account for funding, such as a bank account or loan.
+
+Acquire an asset with normalized JSON:
+
+```json
+{
+  "name": "Production laptop",
+  "description": "Primary development workstation",
+  "acquisition_date": "2026-03-10",
+  "placed_in_service_date": "2026-03-15",
+  "cost_cents": 240000,
+  "salvage_value_cents": 0,
+  "useful_life_months": 36,
+  "depreciation_method": "straight_line",
+  "depreciation_convention": "full_month",
+  "fixed_asset_account_id": "acct:FIXED_ASSET_ID",
+  "accumulated_depreciation_account_id": "acct:ACCUMULATED_DEPRECIATION_ID",
+  "depreciation_expense_account_id": "acct:DEPRECIATION_EXPENSE_ID",
+  "funding_account_id": "acct:BANK_OR_LOAN_ID",
+  "external_refs": [
+    {
+      "source_system": "merchant",
+      "external_id": "purchase-1001",
+      "external_type": "asset_purchase"
+    }
+  ]
+}
+```
+
+```sh
+./magpie --store .magpie --actor owner fixed-asset acquire-json \
+  --file ./asset.json
+```
+
+The acquisition workflow debits the fixed-asset account and credits the funding account. Review the schedule before posting:
+
+```sh
+./magpie --store .magpie --actor owner fixed-asset schedule \
+  --asset-id asset:ASSET_ID \
+  --as-of-date 2026-05-31
+```
+
+Post every due, closed monthly period through a date:
+
+```sh
+./magpie --store .magpie --actor owner fixed-asset depreciate \
+  --asset-id asset:ASSET_ID \
+  --through-date 2026-05-31
+```
+
+Each period debits depreciation expense and credits accumulated depreciation. Repeating the same command does not create duplicate journals. Use `fixed-asset get` and `fixed-asset list` to inspect register records.
+
 ## Ledger Workflow
 
 Create accounts as an actor with `ledger:write`. Assigning a role at create time also requires `chart:manage`:

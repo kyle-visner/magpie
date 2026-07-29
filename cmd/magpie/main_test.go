@@ -291,6 +291,96 @@ func TestCLIConfiguresAccountingBasisAndStampsJournalEntries(t *testing.T) {
 	}
 }
 
+func TestCLIFixedAssetWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "book", "settings", "set", "--accounting-basis", "modified_cash"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	createAccount := func(name, typ, role string) string {
+		t.Helper()
+		out.Reset()
+		if err := run([]string{
+			"--store", dir,
+			"ledger", "account", "create",
+			"--name", name,
+			"--type", typ,
+			"--role", role,
+		}, &out); err != nil {
+			t.Fatal(err)
+		}
+		return extractNestedString(t, out.Bytes(), "account", "id")
+	}
+	fixedID := createAccount("Equipment", "asset", "fixed_asset")
+	accumulatedID := createAccount("Accumulated Depreciation", "asset", "accumulated_depreciation")
+	expenseID := createAccount("Depreciation Expense", "expense", "depreciation_expense")
+	bankID := createAccount("Operating Bank", "asset", "bank_account")
+
+	assetPath := filepath.Join(dir, "asset.json")
+	assetJSON := `{
+		"name":"Production laptop",
+		"acquisition_date":"2020-03-10",
+		"placed_in_service_date":"2020-03-15",
+		"cost_cents":120000,
+		"useful_life_months":12,
+		"fixed_asset_account_id":"` + fixedID + `",
+		"accumulated_depreciation_account_id":"` + accumulatedID + `",
+		"depreciation_expense_account_id":"` + expenseID + `",
+		"funding_account_id":"` + bankID + `"
+	}`
+	if err := os.WriteFile(assetPath, []byte(assetJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "fixed-asset", "acquire-json", "--file", assetPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	assetID := extractNestedString(t, out.Bytes(), "asset", "id")
+	if assetID == "" {
+		t.Fatal("expected fixed asset id")
+	}
+
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"fixed-asset", "depreciate",
+		"--asset-id", assetID,
+		"--through-date", "2020-05-31",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	result := decoded["result"].(map[string]any)
+	if result["accumulated_depreciation_cents"] != float64(30000) ||
+		len(result["posted_journal_entries"].([]any)) != 3 {
+		t.Fatalf("unexpected CLI depreciation result: %#v", result)
+	}
+
+	out.Reset()
+	if err := run([]string{
+		"--store", dir,
+		"fixed-asset", "schedule",
+		"--asset-id", assetID,
+		"--as-of-date", "2020-05-31",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var schedule map[string]any
+	if err := json.Unmarshal(out.Bytes(), &schedule); err != nil {
+		t.Fatal(err)
+	}
+	if schedule["net_book_value_cents"] != float64(90000) {
+		t.Fatalf("unexpected fixed asset schedule: %#v", schedule)
+	}
+}
+
 func TestCLIUpdatesExistingAccountExternalRefMetadata(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer

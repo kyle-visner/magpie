@@ -46,6 +46,7 @@ type eventEnvelope struct {
 var legacyMagpieNodeTypes = map[string]struct{}{
 	"book.settings":  {},
 	"customer":       {},
+	"fixed_asset":    {},
 	"invoice":        {},
 	"ledger.account": {},
 	"ledger.journal": {},
@@ -386,6 +387,24 @@ func (s *Store) applyNodeWithMetadata(st *State, node Node) (bool, error) {
 			return false, appErr(ErrValidation, "payout.update references unknown payout %s", ev.Payout.ID)
 		}
 		st.Payouts[ev.Payout.ID] = ev.Payout
+	case "fixed_asset.create":
+		var ev fixedAssetCreatePayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return false, err
+		}
+		if _, ok := st.FixedAssets[ev.Asset.ID]; ok {
+			return false, appErr(ErrValidation, "fixed_asset.create references existing fixed asset %s", ev.Asset.ID)
+		}
+		st.FixedAssets[ev.Asset.ID] = ev.Asset
+	case "fixed_asset.update":
+		var ev fixedAssetUpdatePayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return false, err
+		}
+		if _, ok := st.FixedAssets[ev.Asset.ID]; !ok {
+			return false, appErr(ErrValidation, "fixed_asset.update references unknown fixed asset %s", ev.Asset.ID)
+		}
+		st.FixedAssets[ev.Asset.ID] = ev.Asset
 	case "settings.update":
 		var ev settingsUpdatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
