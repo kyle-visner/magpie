@@ -59,6 +59,94 @@ func TestClosePreviewFindsReconciliationStagingAndRoleBlockers(t *testing.T) {
 	_ = invoice
 }
 
+func TestClosePreviewIntegratesNativeBankReconciliation(t *testing.T) {
+	s, owner := newTestStore(t)
+	bank := mustRoleAccount(t, s, owner, "1010", "Native Statement Bank", AccountAsset, AccountRoleBankAccount)
+	revenue := mustRoleAccount(t, s, owner, "4000", "Bank Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	statement, _, err := s.ImportBankStatement(owner, bankStatementFixture(bank, "close-native", 0, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, _, err := s.ImportBankTransaction(owner, bankTransactionFixture(statement, "close-native-income", "2026-06-15", 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := s.PreviewPeriodClose(owner, "2026-06-30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasBlockerForEntity(preview, "unposted_source_document", transaction.ID) {
+		t.Fatalf("staged bank transaction did not block close: %#v", preview.Blockers)
+	}
+	if !hasBlockerForEntity(preview, "unreconciled_bank_statement", statement.ID) {
+		t.Fatalf("open bank statement did not block close: %#v", preview.Blockers)
+	}
+	if !hasBlockerForEntity(preview, "unreconciled_financial_account", bank.ID) {
+		t.Fatalf("unreconciled native bank account did not block close: %#v", preview.Blockers)
+	}
+
+	if _, _, err := s.PostBankTransaction(owner, transaction.ID, revenue.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.CompleteBankReconciliation(owner, statement.ID); err != nil {
+		t.Fatal(err)
+	}
+	preview, err = s.PreviewPeriodClose(owner, "2026-06-30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, blocker := range preview.Blockers {
+		if blocker.EntityID == bank.ID || blocker.EntityID == statement.ID || blocker.EntityID == transaction.ID {
+			t.Fatalf("completed native reconciliation left a bank close blocker: %#v", preview.Blockers)
+		}
+	}
+
+	card := mustRoleAccount(t, s, owner, "2100", "Corporate Card", AccountLiability, AccountRoleCreditCard)
+	preview, err = s.PreviewPeriodClose(owner, "2026-06-30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasBlockerForEntity(preview, "unreconciled_financial_account", card.ID) {
+		t.Fatalf("unreconciled credit-card account did not block close: %#v", preview.Blockers)
+	}
+}
+
+func TestBankCloseBlockersRequireOwnedAndInPeriodActiveJournals(t *testing.T) {
+	tests := []struct {
+		name        string
+		transaction BankTransaction
+		journal     JournalEntry
+	}{
+		{
+			name:        "posted journal owned by another transaction",
+			transaction: BankTransaction{ID: "txn:posted", Date: "2026-06-15", Status: BankTransactionPosted, ActiveJournalEntryIDs: []string{"jrnl:active"}},
+			journal:     JournalEntry{ID: "jrnl:active", Date: "2026-06-15", SourceDocumentType: "bank_transaction", SourceDocumentID: "txn:other"},
+		},
+		{
+			name:        "paired journal missing this transfer leg",
+			transaction: BankTransaction{ID: "txn:paired", Date: "2026-06-15", Status: BankTransactionPaired, ActiveJournalEntryIDs: []string{"jrnl:active"}},
+			journal:     JournalEntry{ID: "jrnl:active", Date: "2026-06-15", SourceDocumentType: "bank_transfer", Metadata: map[string]string{"from_transaction_id": "txn:other-a", "to_transaction_id": "txn:other-b"}},
+		},
+		{
+			name:        "active journal after close boundary",
+			transaction: BankTransaction{ID: "txn:future-journal", Date: "2026-06-15", Status: BankTransactionPosted, ActiveJournalEntryIDs: []string{"jrnl:active"}},
+			journal:     JournalEntry{ID: "jrnl:active", Date: "2026-07-01", SourceDocumentType: "bank_transaction", SourceDocumentID: "txn:future-journal"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st := emptyState()
+			st.BankTransactions[test.transaction.ID] = test.transaction
+			st.JournalEntries[test.journal.ID] = test.journal
+			blockers := bankCloseBlockers(st, "2026-06-30")
+			if len(blockers) != 1 || blockers[0].Code != "missing_linked_journal" || blockers[0].EntityID != test.transaction.ID {
+				t.Fatalf("expected owned in-period journal blocker, got %#v", blockers)
+			}
+		})
+	}
+}
+
 func TestClosePreviewCoversEveryCurrentStagedDomainType(t *testing.T) {
 	s, owner := newTestStore(t)
 	customer, _, err := s.UpsertCustomer(owner, Customer{Name: "Staged Work Customer"})

@@ -45,6 +45,8 @@ type AccountRole string
 const (
 	AccountRoleOperatingCash           AccountRole = "operating_cash"
 	AccountRoleBankAccount             AccountRole = "bank_account"
+	AccountRoleTransferClearing        AccountRole = "transfer_clearing"
+	AccountRoleCreditCard              AccountRole = "credit_card"
 	AccountRoleAccountsReceivable      AccountRole = "accounts_receivable"
 	AccountRoleUndepositedFunds        AccountRole = "undeposited_funds"
 	AccountRoleInventory               AccountRole = "inventory"
@@ -200,6 +202,137 @@ type Payout struct {
 	UpdatedBy            string              `json:"updated_by"`
 }
 
+type BankTransactionStatus string
+
+const (
+	BankTransactionStaged BankTransactionStatus = "staged"
+	BankTransactionPosted BankTransactionStatus = "posted"
+	BankTransactionPaired BankTransactionStatus = "paired"
+)
+
+type ReconciliationStatus string
+
+const (
+	ReconciliationOpen      ReconciliationStatus = "open"
+	ReconciliationCompleted ReconciliationStatus = "completed"
+)
+
+// SourceDocumentReference deliberately contains only an opaque identifier and
+// a content digest. Provider descriptions, account numbers, and other PII do
+// not belong in immutable event metadata.
+type SourceDocumentReference struct {
+	ID            string `json:"id"`
+	ContentSHA256 string `json:"content_sha256"`
+}
+
+type BankStatement struct {
+	ID                    string                   `json:"id"`
+	AccountID             string                   `json:"account_id"`
+	PeriodStart           string                   `json:"period_start"`
+	PeriodEnd             string                   `json:"period_end"`
+	OpeningBalanceCents   int64                    `json:"opening_balance_cents"`
+	ClosingBalanceCents   int64                    `json:"closing_balance_cents"`
+	Currency              string                   `json:"currency"`
+	ExternalRefs          []ExternalSourceRef      `json:"external_refs"`
+	SourceDocument        *SourceDocumentReference `json:"source_document,omitempty"`
+	OpeningJournalEntryID string                   `json:"opening_journal_entry_id,omitempty"`
+	Status                ReconciliationStatus     `json:"status"`
+	CompletedAt           time.Time                `json:"completed_at,omitempty"`
+	CompletedBy           string                   `json:"completed_by,omitempty"`
+	CreatedAt             time.Time                `json:"created_at"`
+	CreatedBy             string                   `json:"created_by"`
+}
+
+type BankReclassification struct {
+	FromAccountID string    `json:"from_account_id"`
+	ToAccountID   string    `json:"to_account_id"`
+	Reason        string    `json:"reason"`
+	JournalID     string    `json:"journal_entry_id"`
+	CreatedAt     time.Time `json:"created_at"`
+	CreatedBy     string    `json:"created_by"`
+}
+
+type BankTransactionReversal struct {
+	Reason                  string    `json:"reason"`
+	Date                    string    `json:"date"`
+	OriginalJournalEntryIDs []string  `json:"original_journal_entry_ids"`
+	ReversalJournalEntryIDs []string  `json:"reversal_journal_entry_ids"`
+	CreatedAt               time.Time `json:"created_at"`
+	CreatedBy               string    `json:"created_by"`
+}
+
+type BankTransferHistory struct {
+	PairID                  string    `json:"pair_id"`
+	OtherTransactionID      string    `json:"other_transaction_id"`
+	EconomicDirection       string    `json:"economic_direction"`
+	JournalEntryIDs         []string  `json:"journal_entry_ids"`
+	ReversalJournalEntryIDs []string  `json:"reversal_journal_entry_ids,omitempty"`
+	ReversalReason          string    `json:"reversal_reason,omitempty"`
+	ReversalDate            string    `json:"reversal_date,omitempty"`
+	CreatedAt               time.Time `json:"created_at"`
+	CreatedBy               string    `json:"created_by"`
+}
+
+// AmountCents is the signed change to the statement balance. Positive amounts
+// increase the balance and negative amounts decrease it. For liability
+// accounts (for example, credit cards), an increase is a credit.
+type BankTransaction struct {
+	ID                    string                    `json:"id"`
+	StatementID           string                    `json:"statement_id"`
+	AccountID             string                    `json:"account_id"`
+	Date                  string                    `json:"date"`
+	AmountCents           int64                     `json:"amount_cents"`
+	Currency              string                    `json:"currency"`
+	Pending               bool                      `json:"pending,omitempty"`
+	ExternalRefs          []ExternalSourceRef       `json:"external_refs"`
+	SourceDocument        *SourceDocumentReference  `json:"source_document,omitempty"`
+	Status                BankTransactionStatus     `json:"status"`
+	ClassificationAccount string                    `json:"classification_account_id,omitempty"`
+	JournalEntryIDs       []string                  `json:"journal_entry_ids,omitempty"`
+	ActiveJournalEntryIDs []string                  `json:"active_journal_entry_ids,omitempty"`
+	PostingVersion        int                       `json:"posting_version,omitempty"`
+	TransferTransactionID string                    `json:"transfer_transaction_id,omitempty"`
+	TransferDirection     string                    `json:"transfer_direction,omitempty"`
+	TransferVersion       int                       `json:"transfer_version,omitempty"`
+	ReversalReason        string                    `json:"reversal_reason,omitempty"`
+	Reclassifications     []BankReclassification    `json:"reclassifications,omitempty"`
+	Reversals             []BankTransactionReversal `json:"reversals,omitempty"`
+	TransferHistory       []BankTransferHistory     `json:"transfer_history,omitempty"`
+	CreatedAt             time.Time                 `json:"created_at"`
+	UpdatedAt             time.Time                 `json:"updated_at"`
+	CreatedBy             string                    `json:"created_by"`
+	UpdatedBy             string                    `json:"updated_by"`
+}
+
+type ReconciliationItem struct {
+	Kind           string `json:"kind"`
+	ID             string `json:"id"`
+	Date           string `json:"date,omitempty"`
+	AmountCents    int64  `json:"amount_cents,omitempty"`
+	BlockingReason string `json:"blocking_reason"`
+}
+
+type ReconciliationReport struct {
+	StatementID             string               `json:"statement_id"`
+	AccountID               string               `json:"account_id"`
+	PeriodStart             string               `json:"period_start"`
+	PeriodEnd               string               `json:"period_end"`
+	Currency                string               `json:"currency"`
+	OpeningBalanceCents     int64                `json:"opening_balance_cents"`
+	StatementActivityCents  int64                `json:"statement_activity_cents"`
+	ClosingBalanceCents     int64                `json:"closing_balance_cents"`
+	LedgerBalanceCents      int64                `json:"ledger_balance_cents"`
+	DifferenceCents         int64                `json:"difference_cents"`
+	ActivityDifferenceCents int64                `json:"activity_difference_cents"`
+	UnmatchedItems          []ReconciliationItem `json:"unmatched_items"`
+	DuplicateItems          []ReconciliationItem `json:"duplicate_items"`
+	PendingItems            []ReconciliationItem `json:"pending_items"`
+	OutOfPeriodItems        []ReconciliationItem `json:"out_of_period_items"`
+	Blockers                []string             `json:"blockers"`
+	CanComplete             bool                 `json:"can_complete"`
+	Status                  ReconciliationStatus `json:"status"`
+}
+
 type Account struct {
 	ID           string              `json:"id"`
 	Number       string              `json:"number,omitempty"`
@@ -261,35 +394,39 @@ type Note struct {
 }
 
 type State struct {
-	Roles          map[string]Role         `json:"roles"`
-	Users          map[string]User         `json:"users"`
-	Settings       BookSettings            `json:"settings"`
-	Accounts       map[string]Account      `json:"accounts"`
-	JournalEntries map[string]JournalEntry `json:"journal_entries"`
-	Customers      map[string]Customer     `json:"customers"`
-	Invoices       map[string]Invoice      `json:"invoices"`
-	Payouts        map[string]Payout       `json:"payouts"`
-	Notes          map[string]Note         `json:"notes"`
-	SourceKeys     map[string]string       `json:"source_keys"`
-	PeriodCloses   map[string]PeriodClose  `json:"period_closes"`
-	PeriodReopens  []PeriodReopen          `json:"period_reopens"`
-	Root           string                  `json:"root,omitempty"`
+	Roles            map[string]Role            `json:"roles"`
+	Users            map[string]User            `json:"users"`
+	Settings         BookSettings               `json:"settings"`
+	Accounts         map[string]Account         `json:"accounts"`
+	JournalEntries   map[string]JournalEntry    `json:"journal_entries"`
+	Customers        map[string]Customer        `json:"customers"`
+	Invoices         map[string]Invoice         `json:"invoices"`
+	Payouts          map[string]Payout          `json:"payouts"`
+	BankStatements   map[string]BankStatement   `json:"bank_statements"`
+	BankTransactions map[string]BankTransaction `json:"bank_transactions"`
+	Notes            map[string]Note            `json:"notes"`
+	SourceKeys       map[string]string          `json:"source_keys"`
+	PeriodCloses     map[string]PeriodClose     `json:"period_closes"`
+	PeriodReopens    []PeriodReopen             `json:"period_reopens"`
+	Root             string                     `json:"root,omitempty"`
 }
 
 func emptyState() State {
 	return State{
-		Roles:          map[string]Role{},
-		Users:          map[string]User{},
-		Settings:       DefaultBookSettings(),
-		Accounts:       map[string]Account{},
-		JournalEntries: map[string]JournalEntry{},
-		Customers:      map[string]Customer{},
-		Invoices:       map[string]Invoice{},
-		Payouts:        map[string]Payout{},
-		Notes:          map[string]Note{},
-		SourceKeys:     map[string]string{},
-		PeriodCloses:   map[string]PeriodClose{},
-		PeriodReopens:  []PeriodReopen{},
+		Roles:            map[string]Role{},
+		Users:            map[string]User{},
+		Settings:         DefaultBookSettings(),
+		Accounts:         map[string]Account{},
+		JournalEntries:   map[string]JournalEntry{},
+		Customers:        map[string]Customer{},
+		Invoices:         map[string]Invoice{},
+		Payouts:          map[string]Payout{},
+		BankStatements:   map[string]BankStatement{},
+		BankTransactions: map[string]BankTransaction{},
+		Notes:            map[string]Note{},
+		SourceKeys:       map[string]string{},
+		PeriodCloses:     map[string]PeriodClose{},
+		PeriodReopens:    []PeriodReopen{},
 	}
 }
 

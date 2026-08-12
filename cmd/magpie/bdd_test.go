@@ -195,6 +195,37 @@ func TestBDDCLIPayoutImportIsIdempotentAndPostsFees(t *testing.T) {
 	})
 }
 
+func TestBDDCLIBankImportPostAndReconciliation(t *testing.T) {
+	world := newCLIWorld(t)
+	world.runOK("init")
+	bankID := world.createAccount("1010", "Operating Bank", "asset", "bank_account")
+	expenseID := world.createAccount("6000", "Software Expense", "expense", "default_expense")
+	statementPath := world.writeJSON("statement.json", map[string]any{
+		"account_id": bankID, "period_start": "2026-06-01", "period_end": "2026-06-30",
+		"opening_balance_cents": 0, "closing_balance_cents": -2500, "currency": "USD",
+		"external_refs":   []map[string]any{{"source_system": "normalized_feed", "external_id": "stmt-1", "external_type": "statement"}},
+		"source_document": map[string]any{"id": "document-1", "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+	})
+	statementID := nestedStringField(t, world.runOK("bank", "statement", "import-json", "--file", statementPath), "statement", "id")
+	transactionPath := world.writeJSON("transaction.json", map[string]any{
+		"statement_id": statementID, "account_id": bankID, "date": "2026-06-10", "amount_cents": -2500, "currency": "USD",
+		"external_refs": []map[string]any{{"source_system": "normalized_feed", "external_id": "txn-1", "external_type": "transaction"}},
+	})
+	transactionID := nestedStringField(t, world.runOK("bank", "transaction", "import-json", "--file", transactionPath), "transaction", "id")
+	posted := nestedMap(t, world.runOK("bank", "transaction", "post", "--transaction-id", transactionID, "--account-id", expenseID), "transaction")
+	if stringField(t, posted, "status") != "posted" {
+		t.Fatalf("unexpected posted transaction: %#v", posted)
+	}
+	preview := world.runOK("bank", "reconciliation", "preview", "--statement-id", statementID)
+	if canComplete, ok := preview["can_complete"].(bool); !ok || !canComplete {
+		t.Fatalf("expected zero-difference preview: %#v", preview)
+	}
+	completed := nestedMap(t, world.runOK("bank", "reconciliation", "complete", "--statement-id", statementID), "reconciliation")
+	if stringField(t, completed, "status") != "completed" {
+		t.Fatalf("unexpected completed reconciliation: %#v", completed)
+	}
+}
+
 type cliWorld struct {
 	t   *testing.T
 	dir string

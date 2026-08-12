@@ -112,9 +112,8 @@ func closePreview(st State, through string) (ClosePreview, error) {
 	}
 	preview := ClosePreview{Through: through, JaybaseRoot: st.Root, AccountingBasis: st.effectiveSettings().AccountingBasis, Blockers: []CloseBlocker{}}
 	// Every domain type capable of holding staged financial work must register a
-	// checker here. This repository currently has invoices and payouts; future
-	// bank-feed or bill models must add a checker before they can claim close
-	// coverage.
+	// checker here. Future bill or other financial models must add a checker
+	// before they can claim close coverage.
 	for _, check := range domainCloseBlockerChecks {
 		preview.Blockers = append(preview.Blockers, check(st, through)...)
 	}
@@ -130,7 +129,7 @@ func closePreview(st State, through string) (ClosePreview, error) {
 				roleOwners[account.Role] = account.ID
 			}
 		}
-		if account.Role == AccountRoleOperatingCash || account.Role == AccountRoleBankAccount {
+		if account.Role == AccountRoleOperatingCash || account.Role == AccountRoleBankAccount || account.Role == AccountRoleCreditCard {
 			reconciledThrough := ""
 			for _, ref := range account.ExternalRefs {
 				candidate := strings.TrimSpace(ref.Metadata["reconciled_through"])
@@ -142,6 +141,11 @@ func closePreview(st State, through string) (ClosePreview, error) {
 				}
 				if candidate > reconciledThrough {
 					reconciledThrough = candidate
+				}
+			}
+			for _, statement := range st.BankStatements {
+				if statement.AccountID == account.ID && statement.Status == ReconciliationCompleted && statement.PeriodEnd > reconciledThrough {
+					reconciledThrough = statement.PeriodEnd
 				}
 			}
 			if reconciledThrough < through {
@@ -206,6 +210,56 @@ type closeBlockerCheck func(State, string) []CloseBlocker
 var domainCloseBlockerChecks = []closeBlockerCheck{
 	invoiceCloseBlockers,
 	payoutCloseBlockers,
+	bankCloseBlockers,
+}
+
+func bankCloseBlockers(st State, through string) []CloseBlocker {
+	blockers := []CloseBlocker{}
+	for _, statement := range st.BankStatements {
+		if statement.PeriodEnd <= through && statement.Status != ReconciliationCompleted {
+			blockers = append(blockers, CloseBlocker{Code: "unreconciled_bank_statement", EntityID: statement.ID, Message: fmt.Sprintf("bank statement %s through %s is not reconciled", statement.ID, statement.PeriodEnd)})
+		}
+	}
+	for _, transaction := range st.BankTransactions {
+		if transaction.Date > through {
+			continue
+		}
+		if transaction.Status == BankTransactionStaged {
+			blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: transaction.ID, Message: fmt.Sprintf("bank transaction %s is staged but not posted or paired", transaction.ID)})
+			continue
+		}
+		if transaction.Status != BankTransactionPosted && transaction.Status != BankTransactionPaired {
+			blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: transaction.ID, Message: fmt.Sprintf("bank transaction %s has invalid workflow status %q", transaction.ID, transaction.Status)})
+			continue
+		}
+		if len(transaction.ActiveJournalEntryIDs) == 0 {
+			blockers = append(blockers, CloseBlocker{Code: "missing_linked_journal", EntityID: transaction.ID, Message: fmt.Sprintf("bank transaction %s has no active journal references", transaction.ID)})
+			continue
+		}
+		for _, journalID := range transaction.ActiveJournalEntryIDs {
+			entry, ok := st.JournalEntries[journalID]
+			if !ok || !bankJournalBelongsToTransaction(entry, transaction) {
+				blockers = append(blockers, CloseBlocker{Code: "missing_linked_journal", EntityID: transaction.ID, Message: fmt.Sprintf("bank transaction %s active journal %s is missing or unrelated", transaction.ID, journalID)})
+				continue
+			}
+			if entry.Date > through {
+				blockers = append(blockers, CloseBlocker{Code: "missing_linked_journal", EntityID: transaction.ID, Message: fmt.Sprintf("bank transaction %s active journal %s is dated after the close boundary", transaction.ID, journalID)})
+			}
+		}
+	}
+	return blockers
+}
+
+func bankJournalBelongsToTransaction(entry JournalEntry, transaction BankTransaction) bool {
+	switch transaction.Status {
+	case BankTransactionPosted:
+		return entry.SourceDocumentType == "bank_transaction" && entry.SourceDocumentID == transaction.ID
+	case BankTransactionPaired:
+		return entry.SourceDocumentType == "bank_transfer" &&
+			(entry.Metadata["from_transaction_id"] == transaction.ID || entry.Metadata["to_transaction_id"] == transaction.ID)
+	default:
+		return false
+	}
 }
 
 func invoiceCloseBlockers(st State, through string) []CloseBlocker {
