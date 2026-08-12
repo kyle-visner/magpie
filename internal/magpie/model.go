@@ -16,6 +16,8 @@ const (
 	PermissionSettingsManage Permission = "settings:manage"
 	PermissionJournalAdjust  Permission = "journal:adjust"
 	PermissionChartManage    Permission = "chart:manage"
+	PermissionPeriodClose    Permission = "period:close"
+	PermissionPeriodReopen   Permission = "period:reopen"
 )
 
 type Role struct {
@@ -404,6 +406,8 @@ type State struct {
 	BankTransactions map[string]BankTransaction `json:"bank_transactions"`
 	Notes            map[string]Note            `json:"notes"`
 	SourceKeys       map[string]string          `json:"source_keys"`
+	PeriodCloses     map[string]PeriodClose     `json:"period_closes"`
+	PeriodReopens    []PeriodReopen             `json:"period_reopens"`
 	Root             string                     `json:"root,omitempty"`
 }
 
@@ -421,6 +425,8 @@ func emptyState() State {
 		BankTransactions: map[string]BankTransaction{},
 		Notes:            map[string]Note{},
 		SourceKeys:       map[string]string{},
+		PeriodCloses:     map[string]PeriodClose{},
+		PeriodReopens:    []PeriodReopen{},
 	}
 }
 

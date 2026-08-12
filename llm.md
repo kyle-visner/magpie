@@ -11,7 +11,8 @@ Magpie is an opinionated accounting CLI backed by an append-only Jaybase event
 history. Humans and agents use the same commands. The domain layer enforces
 role-based permissions, accounting-basis rules, account roles, balanced
 double-entry journals, source-document workflow rules, and source-key
-idempotency before a write is appended.
+idempotency before a write is appended. It also enforces append-only period
+closes and produces root-addressed standard financial reports.
 
 Magpie does not authenticate a human, decide whether source evidence is true,
 provide accounting or tax advice, or parse provider-specific exports. The agent
@@ -332,7 +333,47 @@ note put --title TITLE --body-file FILE
 note get --id ID
 note list
 snapshot create --name NAME
+period close preview --through YYYY-MM-DD
+period close complete --through YYYY-MM-DD
+period reopen --through YYYY-MM-DD --reason REASON
+period close package (--through YYYY-MM-DD | --close-id ID) --output-dir DIR
+report trial-balance --as-of YYYY-MM-DD --format json|csv
+report profit-loss --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
+report balance-sheet --as-of YYYY-MM-DD --format json|csv
+report general-ledger --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
 ```
+
+Always run close preview first and resolve every blocker. Native completed
+bank/card statements provide reconciliation evidence through their period end.
+Financial accounts with role `operating_cash`, `bank_account`, or `credit_card`
+that are reconciled outside Magpie require an external-ref metadata marker
+`reconciled_through=YYYY-MM-DD`; never advance it without source evidence. A
+completed close rejects postings dated on or before its boundary.
+Only an actor with `period:reopen` may reopen it, and the command requires an
+audit reason. Reopening does not delete the close: after corrections, complete
+the close again to create a linked revision.
+
+Current staged-work coverage is exhaustive for the domain models in this
+repository: invoices, payouts, and native bank statements and transactions.
+Open statements, staged bank transactions, and missing active bank journal
+links block close. A future bill or other staged financial model must add a
+close-preview domain checker before it is close-safe.
+
+Close packages regenerate reports from the manifest's exact pre-close Jaybase
+root and verify every SHA-256 before writing files. Retain `manifest.json` with
+all delivered JSON and CSV artifacts. Treat a hash mismatch as an integrity
+failure. The first close report window begins at the book's first journal date;
+later P&L and general-ledger windows begin the day after the previous active
+close. A correction revision has a new `package_id` but preserves
+`original_package_id`, `previous_package_id`, the original close record, and the
+audit reason.
+
+Close events and named refs are separate Jaybase operations. If a close reports
+a ref-write failure, retry a close, reopen, or later close command. Magpie first
+repairs all durable close refs deterministically and does not duplicate the
+close event. Owner and Admin have `period:close` plus `period:reopen`; Accountant
+has close only. Older stores need `rbac defaults repair` to receive these
+defaults.
 
 `state` and `audit` expose broad reconstructed or historical data and require
 `audit:read`. Give that permission only to actors that need it.

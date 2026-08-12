@@ -55,6 +55,43 @@ func TestCLIInitializesStoreAndDeniesUnauthorizedLedgerRead(t *testing.T) {
 	}
 }
 
+func TestCLIPeriodCloseReportsAndPackage(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "book")
+	packageDir := filepath.Join(base, "close-package")
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "report", "trial-balance", "--as-of", "2026-06-30", "--format", "csv"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.String(), "account_id,number,name,account_type,debit_cents,credit_cents\n") {
+		t.Fatalf("unexpected trial balance CSV: %q", out.String())
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "period", "close", "preview", "--through", "2026-06-30"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), `"blocked": true`) {
+		t.Fatalf("empty close should not be blocked: %s", out.String())
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "period", "close", "complete", "--through", "2026-06-30"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "period", "close", "package", "--through", "2026-06-30", "--output-dir", packageDir}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"manifest.json", "trial-balance.json", "trial-balance.csv", "profit-loss.json", "profit-loss.csv", "balance-sheet.json", "balance-sheet.csv", "general-ledger.json", "general-ledger.csv"} {
+		if _, err := os.Stat(filepath.Join(packageDir, name)); err != nil {
+			t.Fatalf("missing package file %s: %v", name, err)
+		}
+	}
+}
+
 func TestCLICreatesAccountAndJournalFromJSON(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer

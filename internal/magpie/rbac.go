@@ -39,7 +39,7 @@ func defaultRoles() map[string]Role {
 				PermissionLedgerRead, PermissionLedgerWrite, PermissionNotesRead, PermissionNotesWrite,
 				PermissionRBACManage, PermissionSnapshot, PermissionAuditRead,
 				PermissionAdminRecover, PermissionSettingsManage, PermissionJournalAdjust,
-				PermissionChartManage,
+				PermissionChartManage, PermissionPeriodClose, PermissionPeriodReopen,
 			},
 		},
 		"Admin": {
@@ -48,12 +48,14 @@ func defaultRoles() map[string]Role {
 				PermissionLedgerRead, PermissionLedgerWrite, PermissionNotesRead, PermissionNotesWrite,
 				PermissionRBACManage, PermissionSnapshot, PermissionAuditRead, PermissionSettingsManage,
 				PermissionJournalAdjust, PermissionChartManage,
+				PermissionPeriodClose, PermissionPeriodReopen,
 			},
 		},
 		"Accountant": {
 			Name: "Accountant",
 			Permissions: []Permission{
 				PermissionLedgerRead, PermissionLedgerWrite, PermissionNotesRead, PermissionAuditRead,
+				PermissionPeriodClose,
 			},
 		},
 		"Operations": {
@@ -174,6 +176,7 @@ func PermissionNames() []string {
 		string(PermissionNotesWrite), string(PermissionRBACManage),
 		string(PermissionSnapshot), string(PermissionAuditRead), string(PermissionAdminRecover),
 		string(PermissionSettingsManage), string(PermissionJournalAdjust), string(PermissionChartManage),
+		string(PermissionPeriodClose), string(PermissionPeriodReopen),
 	}
 	sort.Strings(perms)
 	return perms

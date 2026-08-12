@@ -59,6 +59,9 @@ func (s *Store) ImportPayout(ctx Context, payout Payout) (Payout, string, error)
 		}
 		payout = existing
 	} else {
+		if err := ensurePostingDateOpen(st, payout.Date); err != nil {
+			return Payout{}, "", err
+		}
 		now := s.now().UTC()
 		payout.CreatedAt = now
 		payout.UpdatedAt = now
@@ -77,6 +80,9 @@ func (s *Store) ImportPayout(ctx Context, payout Payout) (Payout, string, error)
 	}
 	if len(payout.JournalEntryIDs) == expectedJournals {
 		return payout, root, nil
+	}
+	if err := ensurePostingDateOpen(st, payout.Date); err != nil {
+		return Payout{}, "", err
 	}
 
 	receive, newRoot, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
