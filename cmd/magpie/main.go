@@ -127,6 +127,7 @@ func (a app) period(args []string, out io.Writer) error {
 		}
 		fs := newFlagSet("period close " + args[1])
 		through := fs.String("through", "", "period end date (YYYY-MM-DD)")
+		closeID := fs.String("close-id", "", "specific historical close revision id")
 		outputDir := fs.String("output-dir", "", "close package output directory")
 		if err := fs.Parse(args[2:]); err != nil {
 			return err
@@ -148,7 +149,16 @@ func (a app) period(args []string, out io.Writer) error {
 			if strings.TrimSpace(*outputDir) == "" {
 				return fmt.Errorf("--output-dir is required")
 			}
-			pkg, err := a.store.BuildClosePackage(a.ctx, *through)
+			if (*through == "") == (*closeID == "") {
+				return fmt.Errorf("exactly one of --through or --close-id is required")
+			}
+			var pkg magpie.ClosePackage
+			var err error
+			if *closeID != "" {
+				pkg, err = a.store.BuildClosePackageByID(a.ctx, *closeID)
+			} else {
+				pkg, err = a.store.BuildClosePackage(a.ctx, *through)
+			}
 			if err != nil {
 				return err
 			}
@@ -828,7 +838,7 @@ Commands:
   period close preview --through YYYY-MM-DD
   period close complete --through YYYY-MM-DD
   period reopen --through YYYY-MM-DD --reason REASON
-  period close package --through YYYY-MM-DD --output-dir DIR
+  period close package (--through YYYY-MM-DD | --close-id ID) --output-dir DIR
   report trial-balance --as-of YYYY-MM-DD --format json|csv
   report profit-loss --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
   report balance-sheet --as-of YYYY-MM-DD --format json|csv

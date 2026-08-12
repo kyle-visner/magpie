@@ -139,7 +139,7 @@ func trialBalance(st State, asOf string) (TrialBalanceReport, error) {
 	if err := validDate("as_of", asOf); err != nil {
 		return TrialBalanceReport{}, err
 	}
-	report := TrialBalanceReport{Provenance: provenance(st, "trial_balance", "", "", asOf)}
+	report := TrialBalanceReport{Provenance: provenance(st, "trial_balance", "", "", asOf), Accounts: []AccountBalance{}}
 	balances, err := accountBalances(st, "", asOf)
 	if err != nil {
 		return report, err
@@ -167,7 +167,7 @@ func profitLoss(st State, from, through string) (ProfitLossReport, error) {
 	if err := validRange(from, through); err != nil {
 		return ProfitLossReport{}, err
 	}
-	report := ProfitLossReport{Provenance: provenance(st, "profit_loss", from, through, "")}
+	report := ProfitLossReport{Provenance: provenance(st, "profit_loss", from, through, ""), Revenue: []AccountBalance{}, Expenses: []AccountBalance{}}
 	balances, err := accountBalances(st, from, through)
 	if err != nil {
 		return report, err
@@ -199,7 +199,7 @@ func balanceSheet(st State, asOf string) (BalanceSheetReport, error) {
 	if err := validDate("as_of", asOf); err != nil {
 		return BalanceSheetReport{}, err
 	}
-	report := BalanceSheetReport{Provenance: provenance(st, "balance_sheet", "", "", asOf)}
+	report := BalanceSheetReport{Provenance: provenance(st, "balance_sheet", "", "", asOf), Assets: []AccountBalance{}, Liabilities: []AccountBalance{}, Equity: []AccountBalance{}}
 	balances, err := accountBalances(st, "", asOf)
 	if err != nil {
 		return report, err
@@ -245,7 +245,7 @@ func generalLedger(st State, from, through string) (GeneralLedgerReport, error) 
 	if err := validRange(from, through); err != nil {
 		return GeneralLedgerReport{}, err
 	}
-	report := GeneralLedgerReport{Provenance: provenance(st, "general_ledger", from, through, "")}
+	report := GeneralLedgerReport{Provenance: provenance(st, "general_ledger", from, through, ""), Lines: []GeneralLedgerLine{}}
 	entries := sortedJournals(st)
 	for _, account := range sortedAccounts(st) {
 		var running int64
@@ -380,7 +380,20 @@ func validRange(from, through string) error {
 	return nil
 }
 
-func CanonicalJSON(report any) ([]byte, error) { return json.Marshal(report) }
+// CanonicalJSON is the byte contract used for close-package hashes. Go's JSON
+// encoder sorts string-keyed maps; report constructors also normalize every
+// collection to a non-nil value so equivalent empty reports cannot hash as
+// either null or []. HTML escaping is disabled because these are data exports,
+// not script fragments.
+func CanonicalJSON(report any) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(report); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte{'\n'}), nil
+}
 
 func ReportCSV(report any) ([]byte, error) {
 	var buf bytes.Buffer

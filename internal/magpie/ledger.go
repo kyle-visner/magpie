@@ -554,12 +554,9 @@ func (s *Store) createWorkflowJournalEntry(ctx Context, req workflowJournalReque
 	if _, exists := st.JournalEntries[entry.ID]; exists {
 		return JournalEntry{}, "", appErr(ErrConflict, "journal entry already exists: %s", entry.ID)
 	}
-	if err := ensurePostingDateOpen(st, entry.Date); err != nil {
-		return JournalEntry{}, "", err
-	}
 	entry.CreatedAt = s.now().UTC()
 	entry.CreatedBy = ctx.Actor
-	hash, err := s.appendEventAt(ctx, "ledger.journal", entry.ID, "workflow journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), st.Root)
+	hash, err := s.appendJournalEntry(ctx, st, entry, sourceKey, "workflow journal create")
 	return entry, hash, err
 }
 
@@ -666,14 +663,21 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 	if _, exists := st.JournalEntries[entry.ID]; exists {
 		return JournalEntry{}, "", appErr(ErrConflict, "journal entry already exists: %s", entry.ID)
 	}
-	if err := ensurePostingDateOpen(st, entry.Date); err != nil {
-		return JournalEntry{}, "", err
-	}
 	entry.GeneratedBy = ctx.Actor
 	entry.CreatedAt = s.now().UTC()
 	entry.CreatedBy = ctx.Actor
-	hash, err := s.appendEventAt(ctx, "ledger.journal", entry.ID, "ledger journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), st.Root)
+	hash, err := s.appendJournalEntry(ctx, st, entry, sourceKey, "ledger journal create")
 	return entry, hash, err
+}
+
+// appendJournalEntry is the single production choke point for all dated
+// postings. Domain workflows and privileged manual journals must both pass
+// through it before a ledger.journal event can be appended.
+func (s *Store) appendJournalEntry(ctx Context, st State, entry JournalEntry, sourceKey, command string) (string, error) {
+	if err := ensurePostingDateOpen(st, entry.Date); err != nil {
+		return "", err
+	}
+	return s.appendEventAt(ctx, "ledger.journal", entry.ID, command, wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), st.Root)
 }
 
 func sourceKeyForEntry(entry JournalEntry) string {

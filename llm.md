@@ -282,7 +282,7 @@ snapshot create --name NAME
 period close preview --through YYYY-MM-DD
 period close complete --through YYYY-MM-DD
 period reopen --through YYYY-MM-DD --reason REASON
-period close package --through YYYY-MM-DD --output-dir DIR
+period close package (--through YYYY-MM-DD | --close-id ID) --output-dir DIR
 report trial-balance --as-of YYYY-MM-DD --format json|csv
 report profit-loss --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
 report balance-sheet --as-of YYYY-MM-DD --format json|csv
@@ -297,10 +297,27 @@ Only an actor with `period:reopen` may reopen it, and the command requires an
 audit reason. Reopening does not delete the close: after corrections, complete
 the close again to create a linked revision.
 
+Current staged-work coverage is exhaustive for the domain models in this
+repository: invoices and payouts. There is no staged bank-feed or bill model.
+Do not claim that the reconciliation marker proves the absence of unposted bank
+transactions. A future staged financial model must add a close-preview domain
+checker before it is close-safe.
+
 Close packages regenerate reports from the manifest's exact pre-close Jaybase
 root and verify every SHA-256 before writing files. Retain `manifest.json` with
 all delivered JSON and CSV artifacts. Treat a hash mismatch as an integrity
-failure.
+failure. The first close report window begins at the book's first journal date;
+later P&L and general-ledger windows begin the day after the previous active
+close. A correction revision has a new `package_id` but preserves
+`original_package_id`, `previous_package_id`, the original close record, and the
+audit reason.
+
+Close events and named refs are separate Jaybase operations. If a close reports
+a ref-write failure, retry a close, reopen, or later close command. Magpie first
+repairs all durable close refs deterministically and does not duplicate the
+close event. Owner and Admin have `period:close` plus `period:reopen`; Accountant
+has close only. Older stores need `rbac defaults repair` to receive these
+defaults.
 
 `state` and `audit` expose broad reconstructed or historical data and require
 `audit:read`. Give that permission only to actors that need it.

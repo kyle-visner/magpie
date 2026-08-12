@@ -443,7 +443,7 @@ func TestAccountRoleMutationRequiresChartManage(t *testing.T) {
 	}
 }
 
-func TestRepairDefaultRolesAddsMissingChartManageForLegacyStores(t *testing.T) {
+func TestRepairDefaultRolesExplicitlyAddsCurrentChartAndPeriodPermissions(t *testing.T) {
 	s, owner := newTestStore(t)
 	if _, err := s.UpsertRole(owner, Role{
 		Name: "Owner",
@@ -518,11 +518,20 @@ func TestRepairDefaultRolesAddsMissingChartManageForLegacyStores(t *testing.T) {
 	if !roleHasPermission(st.Roles["Owner"], PermissionChartManage) {
 		t.Fatalf("expected repaired Owner chart:manage, got %#v", st.Roles["Owner"])
 	}
+	if !roleHasPermission(st.Roles["Owner"], PermissionPeriodClose) || !roleHasPermission(st.Roles["Owner"], PermissionPeriodReopen) {
+		t.Fatalf("expected repaired Owner period close and reopen permissions, got %#v", st.Roles["Owner"])
+	}
 	if !roleHasPermission(st.Roles["Admin"], PermissionChartManage) || !roleHasPermission(st.Roles["Admin"], PermissionAdminRecover) {
 		t.Fatalf("expected repaired Admin to preserve existing permissions and add defaults, got %#v", st.Roles["Admin"])
 	}
+	if !roleHasPermission(st.Roles["Admin"], PermissionPeriodClose) || !roleHasPermission(st.Roles["Admin"], PermissionPeriodReopen) {
+		t.Fatalf("expected repaired Admin period close and reopen permissions, got %#v", st.Roles["Admin"])
+	}
 	if roleHasPermission(st.Roles["Accountant"], PermissionChartManage) {
 		t.Fatalf("Accountant should not gain chart:manage during default repair: %#v", st.Roles["Accountant"])
+	}
+	if !roleHasPermission(st.Roles["Accountant"], PermissionPeriodClose) || roleHasPermission(st.Roles["Accountant"], PermissionPeriodReopen) {
+		t.Fatalf("Accountant should gain close but not privileged reopen: %#v", st.Roles["Accountant"])
 	}
 }
 

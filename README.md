@@ -884,6 +884,9 @@ Preview every close before completing it:
 ./magpie --store .magpie --actor owner period close complete --through 2026-06-30
 ./magpie --store .magpie --actor owner period close package \
   --through 2026-06-30 --output-dir ./close-2026-06
+# Reproduce an earlier revision after a correction:
+./magpie --store .magpie --actor owner period close package \
+  --close-id CLOSE_ID --output-dir ./original-close-revision
 ```
 
 Preview fails closed on staged invoices, invalid or missing workflow account
@@ -892,6 +895,14 @@ roles, malformed journals, and unreconciled accounts carrying the
 statements, reconciliation is an evidence marker on an account external ref:
 `--external-meta reconciled_through=YYYY-MM-DD`. The caller is responsible for
 setting that marker only after reconciling source evidence.
+
+The staged-work checks cover every source-document projection implemented in
+this repository today: invoices (including missing issuance, payment, and
+reversal journals) and payouts (including incomplete or missing journal sets).
+Magpie has no staged bank-feed, bill, or bank-transaction model yet. Adding one
+requires registering its blocker check in the close-preview domain checker list;
+reconciliation metadata alone must not be presented as staged-bank-item
+coverage.
 
 A completed close appends an immutable `period.close` event, creates a named
 Jaybase ref, and prevents journals dated on or before the close date. Reopening
@@ -906,7 +917,25 @@ The original close remains in history. The next close for that date is a new
 revision linked to the original and its reopen reason. A close package contains
 canonical JSON and CSV reports plus `manifest.json`; the manifest records the
 pre-close Jaybase root, basis, account set, parameters, artifact SHA-256 hashes,
-snapshot name, actor, timestamp, and correction lineage.
+snapshot name, actor, timestamp, and correction lineage. Each revision receives
+a new `package_id` while retaining the first revision's immutable
+`original_package_id` and the immediately preceding `previous_package_id`.
+
+The first close's profit-and-loss and general-ledger window starts at the first
+journal date in the book. Later windows start on the day after the previous
+active close, not automatically on the first day of a calendar month. Trial
+balance and balance sheet remain cumulative through the close date.
+
+Jaybase currently appends an event and writes a named ref as separate durable
+operations. If ref creation returns an error after the close event was appended,
+retry a close, reopen, or later close command. Before making another period
+decision, Magpie deterministically repairs every close ref from immutable event
+provenance; it never appends a duplicate close merely to repair a ref.
+
+Default permissions are explicit: Owner and Admin receive `period:close` and
+`period:reopen`; Accountant receives `period:close` only. Run `rbac defaults
+repair` to add these current defaults to an older store. The repair preserves
+custom roles and extra permissions.
 
 Reports can also be produced independently:
 
@@ -956,7 +985,7 @@ snapshot create --name NAME
 period close preview --through YYYY-MM-DD
 period close complete --through YYYY-MM-DD
 period reopen --through YYYY-MM-DD --reason REASON
-period close package --through YYYY-MM-DD --output-dir DIR
+period close package (--through YYYY-MM-DD | --close-id ID) --output-dir DIR
 report trial-balance --as-of YYYY-MM-DD --format json|csv
 report profit-loss --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
 report balance-sheet --as-of YYYY-MM-DD --format json|csv

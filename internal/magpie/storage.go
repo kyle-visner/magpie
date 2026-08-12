@@ -354,11 +354,21 @@ func (s *Store) applyNodeWithMetadata(st *State, node Node) (bool, error) {
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
 			return false, err
 		}
-		if ev.Close.ID == "" || ev.Close.Through == "" || ev.Close.Manifest.SourceRoot == "" {
+		if ev.Close.ID == "" || ev.Close.Through == "" || ev.Close.Revision < 1 || ev.Close.Manifest.SourceRoot == "" ||
+			ev.Close.Manifest.CloseID != ev.Close.ID || ev.Close.Manifest.Through != ev.Close.Through || ev.Close.Manifest.Revision != ev.Close.Revision ||
+			ev.Close.Manifest.PackageID == "" || ev.Close.Manifest.OriginalPackageID == "" {
 			return false, appErr(ErrValidation, "invalid period close in node %s", node.Hash)
+		}
+		if len(node.Parents) != 1 || node.Parents[0] != ev.Close.Manifest.SourceRoot {
+			return false, appErr(ErrIntegrity, "period close %s source root does not match its event parent", ev.Close.ID)
 		}
 		if _, exists := st.PeriodCloses[ev.Close.ID]; exists {
 			return false, appErr(ErrValidation, "duplicate period close %s", ev.Close.ID)
+		}
+		for _, existing := range st.PeriodCloses {
+			if existing.Through == ev.Close.Through && existing.Revision == ev.Close.Revision {
+				return false, appErr(ErrIntegrity, "period close %s duplicates revision %d through %s", ev.Close.ID, ev.Close.Revision, ev.Close.Through)
+			}
 		}
 		ev.Close.Root = node.Hash
 		st.PeriodCloses[ev.Close.ID] = ev.Close

@@ -4,10 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/kyle-visner/jaybase"
 )
 
 type CloseBlocker struct {
@@ -44,6 +47,9 @@ type CloseReportParameters struct {
 type CloseManifest struct {
 	Version              int                   `json:"version"`
 	CloseID              string                `json:"close_id"`
+	PackageID            string                `json:"package_id"`
+	OriginalPackageID    string                `json:"original_package_id"`
+	PreviousPackageID    string                `json:"previous_package_id,omitempty"`
 	Revision             int                   `json:"revision"`
 	PreviousCloseID      string                `json:"previous_close_id,omitempty"`
 	CorrectionReason     string                `json:"correction_reason,omitempty"`
@@ -104,11 +110,13 @@ func closePreview(st State, through string) (ClosePreview, error) {
 	if err := validDate("through", through); err != nil {
 		return ClosePreview{}, err
 	}
-	preview := ClosePreview{Through: through, JaybaseRoot: st.Root, AccountingBasis: st.effectiveSettings().AccountingBasis}
-	for _, invoice := range st.Invoices {
-		if invoice.InvoiceDate <= through && invoice.Status == SourceDocumentImported {
-			preview.Blockers = append(preview.Blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s is staged but not posted", invoice.InvoiceNumber)})
-		}
+	preview := ClosePreview{Through: through, JaybaseRoot: st.Root, AccountingBasis: st.effectiveSettings().AccountingBasis, Blockers: []CloseBlocker{}}
+	// Every domain type capable of holding staged financial work must register a
+	// checker here. This repository currently has invoices and payouts; future
+	// bank-feed or bill models must add a checker before they can claim close
+	// coverage.
+	for _, check := range domainCloseBlockerChecks {
+		preview.Blockers = append(preview.Blockers, check(st, through)...)
 	}
 	roleOwners := map[AccountRole]string{}
 	for _, account := range st.Accounts {
@@ -160,11 +168,23 @@ func closePreview(st State, through string) (ClosePreview, error) {
 			preview.Blockers = append(preview.Blockers, CloseBlocker{Code: "accounting_basis_mismatch", EntityID: entry.ID, Message: "journal accounting basis differs from the active book basis"})
 		}
 		var debit, credit int64
+		validTotals := true
 		for _, posting := range entry.Postings {
-			debit += posting.Debit
-			credit += posting.Credit
+			var err error
+			debit, err = checkedAddCents(debit, posting.Debit, "close preview journal debit total")
+			if err != nil {
+				preview.Blockers = append(preview.Blockers, CloseBlocker{Code: "invalid_journal_amount", EntityID: entry.ID, Message: err.Error()})
+				validTotals = false
+				break
+			}
+			credit, err = checkedAddCents(credit, posting.Credit, "close preview journal credit total")
+			if err != nil {
+				preview.Blockers = append(preview.Blockers, CloseBlocker{Code: "invalid_journal_amount", EntityID: entry.ID, Message: err.Error()})
+				validTotals = false
+				break
+			}
 		}
-		if debit != credit {
+		if validTotals && debit != credit {
 			preview.Blockers = append(preview.Blockers, CloseBlocker{Code: "unbalanced_journal", EntityID: entry.ID, Message: fmt.Sprintf("journal debit=%d credit=%d", debit, credit)})
 		}
 	}
@@ -181,6 +201,69 @@ func closePreview(st State, through string) (ClosePreview, error) {
 	return preview, nil
 }
 
+type closeBlockerCheck func(State, string) []CloseBlocker
+
+var domainCloseBlockerChecks = []closeBlockerCheck{
+	invoiceCloseBlockers,
+	payoutCloseBlockers,
+}
+
+func invoiceCloseBlockers(st State, through string) []CloseBlocker {
+	blockers := []CloseBlocker{}
+	basis := st.effectiveSettings().AccountingBasis
+	for _, invoice := range st.Invoices {
+		if invoice.InvoiceDate > through || invoice.Status == SourceDocumentVoid {
+			continue
+		}
+		if invoice.Status == SourceDocumentImported {
+			blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s is staged but not posted", invoice.InvoiceNumber)})
+		}
+		if basis == AccountingBasisAccrual && invoice.Status != SourceDocumentImported && invoice.IssuedJournalEntryID == "" {
+			blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("accrual invoice %s has no issuance journal", invoice.InvoiceNumber)})
+		}
+		if invoice.IssuedJournalEntryID != "" {
+			if !linkedJournalExists(st, invoice.IssuedJournalEntryID, "invoice", invoice.ID) {
+				blockers = append(blockers, CloseBlocker{Code: "missing_linked_journal", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s issuance journal %s is missing", invoice.InvoiceNumber, invoice.IssuedJournalEntryID)})
+			}
+		}
+		for _, payment := range invoice.Payments {
+			if payment.Date <= through && (payment.JournalEntryID == "" || !linkedJournalExists(st, payment.JournalEntryID, "invoice", invoice.ID)) {
+				blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s payment %s has no durable journal", invoice.InvoiceNumber, payment.ID)})
+			}
+			if payment.Reversed && payment.ReversalDate <= through && (payment.ReversalJournalEntryID == "" || !linkedJournalExists(st, payment.ReversalJournalEntryID, "invoice", invoice.ID)) {
+				blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s payment reversal %s has no durable journal", invoice.InvoiceNumber, payment.ID)})
+			}
+		}
+	}
+	return blockers
+}
+
+func payoutCloseBlockers(st State, through string) []CloseBlocker {
+	blockers := []CloseBlocker{}
+	for _, payout := range st.Payouts {
+		if payout.Date > through {
+			continue
+		}
+		expected := 1
+		if payout.FeeAmountCents > 0 {
+			expected = 2
+		}
+		valid := len(payout.JournalEntryIDs) == expected
+		for _, journalID := range payout.JournalEntryIDs {
+			valid = valid && linkedJournalExists(st, journalID, "payout", payout.ID)
+		}
+		if !valid {
+			blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: payout.ID, Message: fmt.Sprintf("payout %s has %d of %d required durable journals", payout.ID, len(payout.JournalEntryIDs), expected)})
+		}
+	}
+	return blockers
+}
+
+func linkedJournalExists(st State, journalID, documentType, documentID string) bool {
+	entry, ok := st.JournalEntries[journalID]
+	return ok && entry.SourceDocumentType == documentType && entry.SourceDocumentID == documentID
+}
+
 func (s *Store) CompletePeriodClose(ctx Context, through string) (PeriodClose, error) {
 	st, err := s.LoadState()
 	if err != nil {
@@ -192,10 +275,14 @@ func (s *Store) CompletePeriodClose(ctx Context, through string) (PeriodClose, e
 	if err := validDate("through", through); err != nil {
 		return PeriodClose{}, err
 	}
+	// A close event and its Jaybase named ref cannot be committed atomically by
+	// the current storage contract. Repair every durable close ref before making
+	// another close decision; this makes retry safe even after a reopen or a
+	// later close was appended following a lost/failed ref response.
+	if err := s.repairCloseNamedRefs(st); err != nil {
+		return PeriodClose{}, err
+	}
 	if current, ok := activeCloseForThrough(st, through); ok {
-		if err := s.writeNamedRef(current.Manifest.SnapshotName, current.Root); err != nil {
-			return PeriodClose{}, err
-		}
 		return current, nil
 	}
 	if active, ok := latestActiveClose(st); ok && through <= active.Through {
@@ -210,8 +297,14 @@ func (s *Store) CompletePeriodClose(ctx Context, through string) (PeriodClose, e
 	}
 	revision, previousID, correctionReason := nextCloseRevision(st, through)
 	closeID := makeID("close", through, fmt.Sprintf("%d", revision), st.Root)
+	packageID := makeID("close-package", closeID)
+	originalPackageID, previousPackageID := packageLineage(st, through, packageID)
 	snapshotName := fmt.Sprintf("period-close-%s-r%d", through, revision)
-	files, parameters, err := closeReportArtifacts(st, through)
+	parameters, err := closeReportParameters(st, through)
+	if err != nil {
+		return PeriodClose{}, err
+	}
+	files, err := closeReportArtifacts(st, parameters)
 	if err != nil {
 		return PeriodClose{}, err
 	}
@@ -226,7 +319,8 @@ func (s *Store) CompletePeriodClose(ctx Context, through string) (PeriodClose, e
 	}
 	closedAt := s.now().UTC()
 	close := PeriodClose{ID: closeID, Through: through, Revision: revision, Manifest: CloseManifest{
-		Version: 1, CloseID: closeID, Revision: revision, PreviousCloseID: previousID, CorrectionReason: correctionReason,
+		Version: 1, CloseID: closeID, PackageID: packageID, OriginalPackageID: originalPackageID, PreviousPackageID: previousPackageID,
+		Revision: revision, PreviousCloseID: previousID, CorrectionReason: correctionReason,
 		SourceRoot: st.Root, SnapshotName: snapshotName, AccountingBasis: st.effectiveSettings().AccountingBasis,
 		Through: through, Accounts: accounts, Parameters: parameters, ReportSHA256: hashes,
 		UnresolvedExceptions: []CloseBlocker{}, ClosedAt: closedAt, ClosedBy: ctx.Actor,
@@ -236,7 +330,7 @@ func (s *Store) CompletePeriodClose(ctx Context, through string) (PeriodClose, e
 		return PeriodClose{}, err
 	}
 	close.Root = root
-	if err := s.writeNamedRef(snapshotName, root); err != nil {
+	if err := s.ensureCloseNamedRef(snapshotName, root); err != nil {
 		return PeriodClose{}, err
 	}
 	return close, nil
@@ -256,6 +350,9 @@ func (s *Store) ReopenPeriod(ctx Context, through, reason string) (PeriodReopen,
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return PeriodReopen{}, appErr(ErrValidation, "reopen reason is required")
+	}
+	if err := s.repairCloseNamedRefs(st); err != nil {
+		return PeriodReopen{}, err
 	}
 	active, ok := latestActiveClose(st)
 	if !ok || active.Through != through {
@@ -279,15 +376,43 @@ func (s *Store) BuildClosePackage(ctx Context, through string) (ClosePackage, er
 	if err := EnsurePermission(current, ctx, PermissionLedgerRead); err != nil {
 		return ClosePackage{}, err
 	}
+	if err := validDate("through", through); err != nil {
+		return ClosePackage{}, err
+	}
 	close, ok := latestCloseForThrough(current, through)
 	if !ok {
 		return ClosePackage{}, appErr(ErrNotFound, "period close through %s not found", through)
 	}
+	return s.buildClosePackage(close)
+}
+
+// BuildClosePackageByID reproduces a specific historical revision. This keeps
+// an originally delivered package addressable after corrected revisions exist.
+func (s *Store) BuildClosePackageByID(ctx Context, closeID string) (ClosePackage, error) {
+	current, err := s.LoadState()
+	if err != nil {
+		return ClosePackage{}, err
+	}
+	if err := EnsurePermission(current, ctx, PermissionLedgerRead); err != nil {
+		return ClosePackage{}, err
+	}
+	closeID = strings.TrimSpace(closeID)
+	if closeID == "" {
+		return ClosePackage{}, appErr(ErrValidation, "close_id is required")
+	}
+	close, ok := current.PeriodCloses[closeID]
+	if !ok {
+		return ClosePackage{}, appErr(ErrNotFound, "period close %s not found", closeID)
+	}
+	return s.buildClosePackage(close)
+}
+
+func (s *Store) buildClosePackage(close PeriodClose) (ClosePackage, error) {
 	st, err := s.stateAtRoot(close.Manifest.SourceRoot)
 	if err != nil {
 		return ClosePackage{}, err
 	}
-	files, _, err := closeReportArtifacts(st, through)
+	files, err := closeReportArtifacts(st, close.Manifest.Parameters)
 	if err != nil {
 		return ClosePackage{}, err
 	}
@@ -309,25 +434,59 @@ func (s *Store) BuildClosePackage(ctx Context, through string) (ClosePackage, er
 	return ClosePackage{Close: close, Files: files}, nil
 }
 
-func closeReportArtifacts(st State, through string) (map[string][]byte, CloseReportParameters, error) {
-	parsed, _ := time.Parse("2006-01-02", through)
-	from := time.Date(parsed.Year(), parsed.Month(), 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
-	parameters := CloseReportParameters{TrialBalanceAsOf: through, ProfitLossFrom: from, ProfitLossThrough: through, BalanceSheetAsOf: through, GeneralLedgerFrom: from, GeneralLedgerThrough: through}
-	tb, err := trialBalance(st, through)
+func closeReportParameters(st State, through string) (CloseReportParameters, error) {
+	parsedThrough, err := time.Parse("2006-01-02", through)
 	if err != nil {
-		return nil, parameters, err
+		return CloseReportParameters{}, appErr(ErrValidation, "through must use YYYY-MM-DD")
 	}
-	pl, err := profitLoss(st, from, through)
-	if err != nil {
-		return nil, parameters, err
+	from := through
+	if previous, ok := latestActiveCloseBefore(st, through); ok {
+		parsedPrevious, err := time.Parse("2006-01-02", previous.Through)
+		if err != nil {
+			return CloseReportParameters{}, appErr(ErrIntegrity, "previous close date %q is invalid", previous.Through)
+		}
+		from = parsedPrevious.AddDate(0, 0, 1).Format("2006-01-02")
+	} else {
+		for _, entry := range st.JournalEntries {
+			if entry.Date <= through && (from == through || entry.Date < from) {
+				from = entry.Date
+			}
+		}
 	}
-	bs, err := balanceSheet(st, through)
-	if err != nil {
-		return nil, parameters, err
+	if from > parsedThrough.Format("2006-01-02") {
+		return CloseReportParameters{}, appErr(ErrIntegrity, "close report start %s is after through date %s", from, through)
 	}
-	gl, err := generalLedger(st, from, through)
+	return CloseReportParameters{TrialBalanceAsOf: through, ProfitLossFrom: from, ProfitLossThrough: through, BalanceSheetAsOf: through, GeneralLedgerFrom: from, GeneralLedgerThrough: through}, nil
+}
+
+func closeReportArtifacts(st State, parameters CloseReportParameters) (map[string][]byte, error) {
+	if err := validDate("trial_balance_as_of", parameters.TrialBalanceAsOf); err != nil {
+		return nil, err
+	}
+	if err := validRange(parameters.ProfitLossFrom, parameters.ProfitLossThrough); err != nil {
+		return nil, err
+	}
+	if err := validDate("balance_sheet_as_of", parameters.BalanceSheetAsOf); err != nil {
+		return nil, err
+	}
+	if err := validRange(parameters.GeneralLedgerFrom, parameters.GeneralLedgerThrough); err != nil {
+		return nil, err
+	}
+	tb, err := trialBalance(st, parameters.TrialBalanceAsOf)
 	if err != nil {
-		return nil, parameters, err
+		return nil, err
+	}
+	pl, err := profitLoss(st, parameters.ProfitLossFrom, parameters.ProfitLossThrough)
+	if err != nil {
+		return nil, err
+	}
+	bs, err := balanceSheet(st, parameters.BalanceSheetAsOf)
+	if err != nil {
+		return nil, err
+	}
+	gl, err := generalLedger(st, parameters.GeneralLedgerFrom, parameters.GeneralLedgerThrough)
+	if err != nil {
+		return nil, err
 	}
 	reports := []struct {
 		name  string
@@ -337,19 +496,22 @@ func closeReportArtifacts(st State, through string) (map[string][]byte, CloseRep
 	for _, report := range reports {
 		jsonData, err := CanonicalJSON(report.value)
 		if err != nil {
-			return nil, parameters, err
+			return nil, err
 		}
 		files[report.name+".json"] = append(jsonData, '\n')
 		csvData, err := ReportCSV(report.value)
 		if err != nil {
-			return nil, parameters, err
+			return nil, err
 		}
 		files[report.name+".csv"] = csvData
 	}
-	return files, parameters, nil
+	return files, nil
 }
 
 func ensurePostingDateOpen(st State, date string) error {
+	if err := validDate("posting date", date); err != nil {
+		return err
+	}
 	if close, ok := latestActiveClose(st); ok && date <= close.Through {
 		return appErr(ErrValidation, "posting date %s is in closed period through %s; privileged reopen is required", date, close.Through)
 	}
@@ -367,7 +529,7 @@ func latestActiveClose(st State) (PeriodClose, bool) {
 		if reopened[close.ID] {
 			continue
 		}
-		if !found || close.Through > best.Through || (close.Through == best.Through && close.Revision > best.Revision) {
+		if !found || closeAfter(close, best) {
 			best, found = close, true
 		}
 	}
@@ -383,11 +545,113 @@ func latestCloseForThrough(st State, through string) (PeriodClose, bool) {
 	var best PeriodClose
 	found := false
 	for _, close := range st.PeriodCloses {
-		if close.Through == through && (!found || close.Revision > best.Revision) {
+		if close.Through == through && (!found || closeAfter(close, best)) {
 			best, found = close, true
 		}
 	}
 	return best, found
+}
+
+func latestActiveCloseBefore(st State, through string) (PeriodClose, bool) {
+	reopened := map[string]bool{}
+	for _, reopen := range st.PeriodReopens {
+		reopened[reopen.CloseID] = true
+	}
+	var best PeriodClose
+	found := false
+	for _, close := range st.PeriodCloses {
+		if reopened[close.ID] || close.Through >= through {
+			continue
+		}
+		if !found || closeAfter(close, best) {
+			best, found = close, true
+		}
+	}
+	return best, found
+}
+
+// closeAfter is a total ordering. Normal closes are serialized by Jaybase CAS,
+// so a revision tie cannot be produced through CompletePeriodClose. The ID tie
+// breaker keeps replay deterministic if a hand-crafted or future event violates
+// that invariant.
+func closeAfter(left, right PeriodClose) bool {
+	if left.Through != right.Through {
+		return left.Through > right.Through
+	}
+	if left.Revision != right.Revision {
+		return left.Revision > right.Revision
+	}
+	return left.ID > right.ID
+}
+
+func packageLineage(st State, through, newPackageID string) (string, string) {
+	previous, ok := latestCloseForThrough(st, through)
+	if !ok {
+		return newPackageID, ""
+	}
+	original := previous.Manifest.OriginalPackageID
+	if original == "" {
+		original = previous.Manifest.PackageID
+	}
+	if original == "" {
+		original = previous.ID
+	}
+	previousPackage := previous.Manifest.PackageID
+	if previousPackage == "" {
+		previousPackage = previous.ID
+	}
+	return original, previousPackage
+}
+
+func (s *Store) repairCloseNamedRefs(st State) error {
+	closes := make([]PeriodClose, 0, len(st.PeriodCloses))
+	for _, close := range st.PeriodCloses {
+		closes = append(closes, close)
+	}
+	sort.Slice(closes, func(i, j int) bool {
+		if closes[i].Through != closes[j].Through {
+			return closes[i].Through < closes[j].Through
+		}
+		if closes[i].Revision != closes[j].Revision {
+			return closes[i].Revision < closes[j].Revision
+		}
+		return closes[i].ID < closes[j].ID
+	})
+	for _, close := range closes {
+		if close.Manifest.SnapshotName == "" || close.Root == "" {
+			return appErr(ErrIntegrity, "period close %s is missing snapshot provenance", close.ID)
+		}
+		if err := s.ensureCloseNamedRef(close.Manifest.SnapshotName, close.Root); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureCloseNamedRef(name, root string) error {
+	current, err := s.db.NamedRef(name)
+	if err == nil {
+		if current != root {
+			return appErr(ErrIntegrity, "period close ref %s points to %s, expected %s", name, current, root)
+		}
+		return nil
+	}
+	var dbErr *jaybase.AppError
+	if !errors.As(err, &dbErr) || dbErr.Code != jaybase.ErrNotFound {
+		return storageError(err)
+	}
+	if err := s.db.WriteNamedRefAt(name, root, ""); err != nil {
+		writeErr := storageError(err)
+		current, readErr := s.db.NamedRef(name)
+		if readErr == nil {
+			if current == root {
+				return nil
+			}
+			return appErr(ErrIntegrity, "period close ref %s concurrently changed to %s, expected %s", name, current, root)
+		}
+		return writeErr
+	}
+	return nil
 }
 
 func nextCloseRevision(st State, through string) (int, string, string) {
