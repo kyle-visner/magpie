@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"magpie/internal/magpie"
@@ -106,8 +107,121 @@ func run(args []string, out io.Writer) error {
 		return a.note(rest[1:], out)
 	case "snapshot":
 		return a.snapshot(rest[1:], out)
+	case "period":
+		return a.period(rest[1:], out)
+	case "report":
+		return a.report(rest[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q", rest[0])
+	}
+}
+
+func (a app) period(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("period command required")
+	}
+	switch args[0] {
+	case "close":
+		if len(args) < 2 {
+			return fmt.Errorf("period close command required")
+		}
+		fs := newFlagSet("period close " + args[1])
+		through := fs.String("through", "", "period end date (YYYY-MM-DD)")
+		outputDir := fs.String("output-dir", "", "close package output directory")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		switch args[1] {
+		case "preview":
+			preview, err := a.store.PreviewPeriodClose(a.ctx, *through)
+			if err != nil {
+				return err
+			}
+			return writeJSON(out, preview)
+		case "complete":
+			close, err := a.store.CompletePeriodClose(a.ctx, *through)
+			if err != nil {
+				return err
+			}
+			return writeJSON(out, close)
+		case "package":
+			if strings.TrimSpace(*outputDir) == "" {
+				return fmt.Errorf("--output-dir is required")
+			}
+			pkg, err := a.store.BuildClosePackage(a.ctx, *through)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(*outputDir, 0o700); err != nil {
+				return err
+			}
+			for name, data := range pkg.Files {
+				if err := os.WriteFile(filepath.Join(*outputDir, name), data, 0o600); err != nil {
+					return err
+				}
+			}
+			return writeJSON(out, map[string]any{"close": pkg.Close, "output_dir": *outputDir, "file_count": len(pkg.Files)})
+		default:
+			return fmt.Errorf("unknown period close command %q", args[1])
+		}
+	case "reopen":
+		fs := newFlagSet("period reopen")
+		through := fs.String("through", "", "period end date (YYYY-MM-DD)")
+		reason := fs.String("reason", "", "required audit reason")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		reopen, err := a.store.ReopenPeriod(a.ctx, *through, *reason)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, reopen)
+	default:
+		return fmt.Errorf("unknown period command %q", args[0])
+	}
+}
+
+func (a app) report(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("report command required")
+	}
+	fs := newFlagSet("report " + args[0])
+	from := fs.String("from", "", "report start date (YYYY-MM-DD)")
+	through := fs.String("through", "", "report end date (YYYY-MM-DD)")
+	asOf := fs.String("as-of", "", "report date (YYYY-MM-DD)")
+	format := fs.String("format", "json", "json or csv")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	var value any
+	var err error
+	switch args[0] {
+	case "trial-balance":
+		value, err = a.store.TrialBalance(a.ctx, *asOf)
+	case "profit-loss":
+		value, err = a.store.ProfitLoss(a.ctx, *from, *through)
+	case "balance-sheet":
+		value, err = a.store.BalanceSheet(a.ctx, *asOf)
+	case "general-ledger":
+		value, err = a.store.GeneralLedger(a.ctx, *from, *through)
+	default:
+		return fmt.Errorf("unknown report command %q", args[0])
+	}
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "json":
+		return writeJSON(out, value)
+	case "csv":
+		data, err := magpie.ReportCSV(value)
+		if err != nil {
+			return err
+		}
+		_, err = out.Write(data)
+		return err
+	default:
+		return fmt.Errorf("format must be json or csv")
 	}
 }
 
@@ -711,6 +825,14 @@ Commands:
   note get --id ID
   note list
   snapshot create --name NAME
+  period close preview --through YYYY-MM-DD
+  period close complete --through YYYY-MM-DD
+  period reopen --through YYYY-MM-DD --reason REASON
+  period close package --through YYYY-MM-DD --output-dir DIR
+  report trial-balance --as-of YYYY-MM-DD --format json|csv
+  report profit-loss --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
+  report balance-sheet --as-of YYYY-MM-DD --format json|csv
+  report general-ledger --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
 
 Global flags:
   --store DIR

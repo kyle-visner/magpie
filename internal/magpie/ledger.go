@@ -554,6 +554,9 @@ func (s *Store) createWorkflowJournalEntry(ctx Context, req workflowJournalReque
 	if _, exists := st.JournalEntries[entry.ID]; exists {
 		return JournalEntry{}, "", appErr(ErrConflict, "journal entry already exists: %s", entry.ID)
 	}
+	if err := ensurePostingDateOpen(st, entry.Date); err != nil {
+		return JournalEntry{}, "", err
+	}
 	entry.CreatedAt = s.now().UTC()
 	entry.CreatedBy = ctx.Actor
 	hash, err := s.appendEventAt(ctx, "ledger.journal", entry.ID, "workflow journal create", wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), st.Root)
@@ -662,6 +665,9 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 	}
 	if _, exists := st.JournalEntries[entry.ID]; exists {
 		return JournalEntry{}, "", appErr(ErrConflict, "journal entry already exists: %s", entry.ID)
+	}
+	if err := ensurePostingDateOpen(st, entry.Date); err != nil {
+		return JournalEntry{}, "", err
 	}
 	entry.GeneratedBy = ctx.Actor
 	entry.CreatedAt = s.now().UTC()

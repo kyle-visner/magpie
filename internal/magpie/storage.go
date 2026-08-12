@@ -51,6 +51,8 @@ var legacyMagpieNodeTypes = map[string]struct{}{
 	"ledger.journal": {},
 	"note":           {},
 	"payout":         {},
+	"period.close":   {},
+	"period.reopen":  {},
 	"rbac.role":      {},
 	"rbac.user":      {},
 	"store.init":     {},
@@ -347,6 +349,34 @@ func (s *Store) applyNodeWithMetadata(st *State, node Node) (bool, error) {
 		if ev.SourceKey != "" {
 			st.SourceKeys[ev.SourceKey] = ev.Entry.ID
 		}
+	case "period.close.complete":
+		var ev periodClosePayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return false, err
+		}
+		if ev.Close.ID == "" || ev.Close.Through == "" || ev.Close.Manifest.SourceRoot == "" {
+			return false, appErr(ErrValidation, "invalid period close in node %s", node.Hash)
+		}
+		if _, exists := st.PeriodCloses[ev.Close.ID]; exists {
+			return false, appErr(ErrValidation, "duplicate period close %s", ev.Close.ID)
+		}
+		ev.Close.Root = node.Hash
+		st.PeriodCloses[ev.Close.ID] = ev.Close
+	case "period.reopen":
+		var ev periodReopenPayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return false, err
+		}
+		if _, exists := st.PeriodCloses[ev.Reopen.CloseID]; !exists {
+			return false, appErr(ErrValidation, "period reopen references unknown close %s", ev.Reopen.CloseID)
+		}
+		for _, existing := range st.PeriodReopens {
+			if existing.ID == ev.Reopen.ID {
+				return false, appErr(ErrValidation, "duplicate period reopen %s", ev.Reopen.ID)
+			}
+		}
+		ev.Reopen.Root = node.Hash
+		st.PeriodReopens = append(st.PeriodReopens, ev.Reopen)
 	case "customer.upsert":
 		var ev customerUpsertPayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {

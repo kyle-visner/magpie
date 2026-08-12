@@ -50,7 +50,7 @@ outside its current scope:
 
 - native QuickBooks CSV, IIF, or QBXML parsing; agents must normalize source
   data into Magpie's JSON contracts;
-- bills, bank matching or reconciliation, period close, tax, loan, transfer,
+- bills, bank matching or statement-ingestion, tax, loan, transfer,
   fixed-asset, retention, garbage-collection, or point-in-time restore commands;
 - note search, backlinks, typed cross-entity references, diff, or graph
   navigation;
@@ -90,6 +90,8 @@ AGPL-3.0-or-later. See `LICENSE`.
 - Markdown note create, update, list, and get operations.
 - Source-tagged journal entries for agent-mapped exports from QuickBooks or other systems.
 - Named snapshots for recoverable roots.
+- Append-only period close, privileged audited reopen, closed-period posting protection, and reproducible close packages.
+- Deterministic trial balance, profit-and-loss, balance-sheet, and general-ledger reports in JSON and CSV.
 - JSON command output by default for agent consumption.
 - Automated tests for business invariants, CLI behavior, and BDD-style core scenarios.
 
@@ -873,6 +875,48 @@ Read immutable audit nodes:
 
 Both `state` and `audit` require `audit:read`.
 
+## Period close and reports
+
+Preview every close before completing it:
+
+```sh
+./magpie --store .magpie --actor owner period close preview --through 2026-06-30
+./magpie --store .magpie --actor owner period close complete --through 2026-06-30
+./magpie --store .magpie --actor owner period close package \
+  --through 2026-06-30 --output-dir ./close-2026-06
+```
+
+Preview fails closed on staged invoices, invalid or missing workflow account
+roles, malformed journals, and unreconciled accounts carrying the
+`operating_cash` or `bank_account` role. Because Magpie does not ingest bank
+statements, reconciliation is an evidence marker on an account external ref:
+`--external-meta reconciled_through=YYYY-MM-DD`. The caller is responsible for
+setting that marker only after reconciling source evidence.
+
+A completed close appends an immutable `period.close` event, creates a named
+Jaybase ref, and prevents journals dated on or before the close date. Reopening
+requires `period:reopen` and a non-empty reason:
+
+```sh
+./magpie --store .magpie --actor owner period reopen \
+  --through 2026-06-30 --reason "late bank statement correction"
+```
+
+The original close remains in history. The next close for that date is a new
+revision linked to the original and its reopen reason. A close package contains
+canonical JSON and CSV reports plus `manifest.json`; the manifest records the
+pre-close Jaybase root, basis, account set, parameters, artifact SHA-256 hashes,
+snapshot name, actor, timestamp, and correction lineage.
+
+Reports can also be produced independently:
+
+```sh
+./magpie --store .magpie --actor owner report trial-balance --as-of 2026-06-30 --format json
+./magpie --store .magpie --actor owner report profit-loss --from 2026-06-01 --through 2026-06-30 --format csv
+./magpie --store .magpie --actor owner report balance-sheet --as-of 2026-06-30 --format json
+./magpie --store .magpie --actor owner report general-ledger --from 2026-06-01 --through 2026-06-30 --format csv
+```
+
 ## Command Reference
 
 ```text
@@ -909,6 +953,14 @@ note put --title TITLE --body-file FILE
 note get --id ID
 note list
 snapshot create --name NAME
+period close preview --through YYYY-MM-DD
+period close complete --through YYYY-MM-DD
+period reopen --through YYYY-MM-DD --reason REASON
+period close package --through YYYY-MM-DD --output-dir DIR
+report trial-balance --as-of YYYY-MM-DD --format json|csv
+report profit-loss --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
+report balance-sheet --as-of YYYY-MM-DD --format json|csv
+report general-ledger --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
 ```
 
 Global flags:
