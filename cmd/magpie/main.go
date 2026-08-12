@@ -231,7 +231,7 @@ func (a app) bankTransfer(args []string, out io.Writer) error {
 	fromID := fs.String("from-transaction-id", "", "outgoing transaction id")
 	toID := fs.String("to-transaction-id", "", "incoming transaction id")
 	reason := fs.String("reason", "", "audited transfer reversal reason")
-	date := fs.String("date", "", "reversal date; defaults to the original transfer journal date")
+	date := fs.String("date", "", "optional reversal date; must match every original leg, so omit for cross-period transfers")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}

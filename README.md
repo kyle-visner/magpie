@@ -411,7 +411,7 @@ Role rules:
 
 - Roles must match account type. For example, `accounts_receivable` requires an `asset` account and `sales_tax_payable` requires a `liability` account.
 - Roles such as `operating_cash`, `accounts_receivable`, `accounts_payable`, `sales_tax_payable`, `retained_earnings`, and default revenue roles are unique.
-- Roles such as `bank_account`, `fixed_asset`, `inventory`, and `default_expense` can be assigned to the accounts they represent when allowed by validation.
+- Roles such as `bank_account`, `transfer_clearing`, `fixed_asset`, `inventory`, and `default_expense` can be assigned to the accounts they represent when allowed by validation.
 - Workflow commands should require roles, not hard-coded account names or chart numbers.
 
 ## External Source References
@@ -784,13 +784,15 @@ Import a statement and one transaction:
   --transaction-id btxn:... --account-id acct:EXPENSE_ID
 ```
 
-When the first statement for an otherwise unused account has a nonzero opening
-balance, import creates a guarded `bank.statement.opening_balance` workflow
-journal dated one day before the period. This requires a configured
+For the first statement on an account, Magpie compares the ledger balance
+strictly before `period_start` with the statement opening balance. A nonzero
+difference creates a guarded `bank.statement.opening_balance` workflow journal
+for only that delta, dated one day before the period. This requires a configured
 `opening_balance_equity` account and only `ledger:write`; it never uses
-`journal:adjust`. Magpie creates no opening adjustment when the account already
-has ledger activity or a prior statement, so an unexplained mismatch remains a
-reconciliation blocker instead of being forced into balance.
+`journal:adjust`. Activity on or after the period start does not suppress or
+change the opening delta. Later statements never create opening adjustments.
+If a retry finds the opening source key, its date, accounts, postings, and
+amount must exactly match the recomputed delta or the import conflicts.
 
 A canonical transaction includes `statement_id`, the same `account_id` and
 `currency` as its statement, `date`, nonzero signed `amount_cents`, and a
@@ -809,7 +811,13 @@ Pairing requires equal amounts with opposite ledger effects, matching
 currencies, different book accounts, and two settled staged rows. This also
 handles bank-to-credit-card payments, whose statement amounts can have the same
 sign because asset and liability normal balances differ. Each transaction can
-belong to only one pair.
+belong to only one pair. When one journal date falls inside both statement
+periods, Magpie creates one direct transfer journal. For an ordinary
+cross-period transfer such as January 31 to February 1, configure the unique
+asset role `transfer_clearing`; Magpie creates an outgoing journal on the source
+leg date and an incoming journal on the destination leg date through that
+clearing account. Each statement therefore reconciles in its own period with
+no income or expense.
 
 Corrections append journals and retain the original decision:
 
@@ -836,11 +844,12 @@ An incorrect transfer pair is also correctable without editing history:
   --reason "paired the wrong statement rows"
 ```
 
-Transfer reversal exactly offsets the pair journal and returns both legs to
+Transfer reversal exactly offsets every pair journal on its original leg date and returns both legs to
 `staged`. They can then be paired correctly or posted through another supported
 workflow. The original economic `from` and `to` directions, pair journal, and
-reversal audit details remain in each transaction's history. Its date defaults
-to and must equal the original transfer journal date.
+reversal audit details remain in each transaction's history. For a one-journal
+transfer an explicit reversal date must match that journal. Omit `--date` for a
+cross-period transfer so each offset retains its own original date.
 
 Preview before completing reconciliation:
 

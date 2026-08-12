@@ -43,6 +43,7 @@ type AccountRole string
 const (
 	AccountRoleOperatingCash           AccountRole = "operating_cash"
 	AccountRoleBankAccount             AccountRole = "bank_account"
+	AccountRoleTransferClearing        AccountRole = "transfer_clearing"
 	AccountRoleCreditCard              AccountRole = "credit_card"
 	AccountRoleAccountsReceivable      AccountRole = "accounts_receivable"
 	AccountRoleUndepositedFunds        AccountRole = "undeposited_funds"
@@ -259,15 +260,15 @@ type BankTransactionReversal struct {
 }
 
 type BankTransferHistory struct {
-	PairID                 string    `json:"pair_id"`
-	OtherTransactionID     string    `json:"other_transaction_id"`
-	EconomicDirection      string    `json:"economic_direction"`
-	JournalEntryID         string    `json:"journal_entry_id"`
-	ReversalJournalEntryID string    `json:"reversal_journal_entry_id,omitempty"`
-	ReversalReason         string    `json:"reversal_reason,omitempty"`
-	ReversalDate           string    `json:"reversal_date,omitempty"`
-	CreatedAt              time.Time `json:"created_at"`
-	CreatedBy              string    `json:"created_by"`
+	PairID                  string    `json:"pair_id"`
+	OtherTransactionID      string    `json:"other_transaction_id"`
+	EconomicDirection       string    `json:"economic_direction"`
+	JournalEntryIDs         []string  `json:"journal_entry_ids"`
+	ReversalJournalEntryIDs []string  `json:"reversal_journal_entry_ids,omitempty"`
+	ReversalReason          string    `json:"reversal_reason,omitempty"`
+	ReversalDate            string    `json:"reversal_date,omitempty"`
+	CreatedAt               time.Time `json:"created_at"`
+	CreatedBy               string    `json:"created_by"`
 }
 
 // AmountCents is the signed change to the statement balance. Positive amounts

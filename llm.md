@@ -207,10 +207,12 @@ workflow journals idempotently from external references.
 
 `bank statement import-json` creates an open statement for an
 `operating_cash`, `bank_account`, or liability `credit_card` account.
-For the first statement on an unused account, a nonzero opening balance creates
-a workflow journal against the configured `opening_balance_equity` role, dated
-one day before the statement period. This uses `ledger:write`, not
-`journal:adjust`. Existing account activity is never silently adjusted.
+For the first statement on an account, Magpie compares the ledger balance
+strictly before the period start and posts only the delta needed to reach the
+statement opening balance against `opening_balance_equity`, dated one day
+before the period. This uses `ledger:write`, not `journal:adjust`; later-period
+activity does not change the delta. Recovery by source key must match the exact
+date, accounts, postings, and amount.
 `bank transaction import-json` stages a row by stable external reference.
 `amount_cents` is the signed statement-balance change; positive increases the
 balance and negative decreases it. A pending transaction cannot be posted or
@@ -222,7 +224,9 @@ balance-sheet movement. It creates a workflow journal with `ledger:write` and
 does not require `journal:adjust`. Another bank/card account is not a valid
 classification; pair the two staged source rows with `bank transfer pair`.
 Pairing requires matching currency, equal amounts, opposite ledger effects,
-and different accounts, and produces one journal with no income or expense.
+and different accounts, with no income or expense. If the statement periods do
+not share a safe posting date, a configured `transfer_clearing` asset account
+supports two balanced leg journals on the source and destination dates.
 
 Use `bank transaction reclassify` or `bank transaction reverse` for audited
 corrections. Both append workflow journals and preserve earlier events.
@@ -234,7 +238,8 @@ no-op after later classification changes.
 
 Use `bank transfer reverse` to offset an incorrect pair. Both legs return to
 `staged`, while pair history retains the economic `from`/`to` direction and
-audit reason. The reversal date must equal the original pair journal date.
+audit reason. Each pair journal is offset on its original date. Omit an explicit
+date for cross-period pairs; a supplied date must match every leg.
 
 Run `bank reconciliation preview` after all source rows are imported. Completion
 requires zero ledger difference, zero opening-plus-activity difference, and no

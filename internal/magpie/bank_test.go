@@ -159,6 +159,62 @@ func TestFirstStatementCreatesGuardedOpeningBalanceWithoutJournalAdjust(t *testi
 	}
 }
 
+func TestFirstStatementPostsOnlyOpeningDeltaAndIgnoresLaterActivity(t *testing.T) {
+	s, ctx := newTestStore(t)
+	bank := mustRoleAccount(t, s, ctx, "1010", "Bank", AccountAsset, AccountRoleBankAccount)
+	equity := mustRoleAccount(t, s, ctx, "3900", "Opening Balance Equity", AccountEquity, AccountRoleOpeningBalanceEquity)
+	revenue := mustRoleAccount(t, s, ctx, "4000", "Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	if _, _, err := s.CreateJournalEntry(ctx, JournalEntry{
+		Date: "2026-05-15", Memo: "Prior ledger balance", ManualReason: "test setup",
+		Postings: []Posting{{AccountID: bank.ID, Debit: 4000}, {AccountID: equity.ID, Credit: 4000}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.CreateJournalEntry(ctx, JournalEntry{
+		Date: "2026-06-10", Memo: "Later-period activity", ManualReason: "test setup",
+		Postings: []Posting{{AccountID: bank.ID, Debit: 1000}, {AccountID: revenue.ID, Credit: 1000}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	statement, _, err := s.ImportBankStatement(ctx, bankStatementFixture(bank, "opening-delta", 10000, 11000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := st.JournalEntries[statement.OpeningJournalEntryID]
+	if len(entry.Postings) != 2 || entry.Postings[0].Debit != 6000 || entry.Postings[1].Credit != 6000 {
+		t.Fatalf("opening workflow did not post only the balance delta: %#v", entry)
+	}
+}
+
+func TestOpeningSourceKeyRecoveryRejectsMismatchedJournal(t *testing.T) {
+	s, ctx := newTestStore(t)
+	bank := mustRoleAccount(t, s, ctx, "1010", "Bank", AccountAsset, AccountRoleBankAccount)
+	equity := mustRoleAccount(t, s, ctx, "3900", "Opening Balance Equity", AccountEquity, AccountRoleOpeningBalanceEquity)
+	input := bankStatementFixture(bank, "opening-mismatch", 100, 100)
+	input.ID = "stmt:opening-mismatch"
+	wrongPostings, err := openingBalancePostings(bank, equity.ID, 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
+		Date: "2026-05-30", Memo: "Statement opening balance " + input.ID,
+		Workflow: "bank.statement.opening_balance", PostingSemantics: "statement_opening_balance",
+		SourceDocumentType: "bank_statement", SourceDocumentID: input.ID,
+		Source: "bank_statement", SourceKey: input.ID + ":opening_balance", Postings: wrongPostings,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = s.ImportBankStatement(ctx, input)
+	var app *AppError
+	if !errors.As(err, &app) || app.Code != ErrConflict {
+		t.Fatalf("expected mismatched recovered opening journal to conflict, got %v", err)
+	}
+}
+
 func TestBankMultiEventWorkflowRecoversAfterStaleRootWithoutDuplicateJournal(t *testing.T) {
 	s, ctx := newTestStore(t)
 	bank := mustRoleAccount(t, s, ctx, "1010", "Bank", AccountAsset, AccountRoleBankAccount)
@@ -266,6 +322,9 @@ func TestBankTransactionCorrectionsPreserveHistoryAndExactlyReverse(t *testing.T
 	if txn.ClassificationAccount != newExpense.ID || len(txn.Reclassifications) != 1 || txn.JournalEntryIDs[0] != originalJournalID {
 		t.Fatalf("reclassification did not preserve original decision: %#v", txn)
 	}
+	if len(txn.ActiveJournalEntryIDs) != 2 || txn.ActiveJournalEntryIDs[0] != originalJournalID {
+		t.Fatalf("post/reclass sequence lost the original active post: %#v", txn.ActiveJournalEntryIDs)
+	}
 	if retry, _, err := s.ReclassifyBankTransaction(ctx, txn.ID, newExpense.ID, "receipt shows travel"); err != nil || len(retry.Reclassifications) != 1 {
 		t.Fatalf("reclassification retry was not idempotent: %#v err=%v", retry, err)
 	}
@@ -277,12 +336,27 @@ func TestBankTransactionCorrectionsPreserveHistoryAndExactlyReverse(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: "bank transaction reverse"}
+	s.db = backend
+	if _, _, err := s.ReverseBankTransaction(ctx, txn.ID, "classification needs to be redone", ""); err == nil {
+		t.Fatal("expected injected transaction-reversal state append failure")
+	}
+	partial, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(partial.BankTransactions[txn.ID].Reversals) != 0 || len(partial.JournalEntries) != 4 {
+		t.Fatalf("unexpected transaction-reversal partial state: %#v", partial)
+	}
 	txn, _, err = s.ReverseBankTransaction(ctx, txn.ID, "classification needs to be redone", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if txn.Status != BankTransactionStaged || txn.ClassificationAccount != "" || len(txn.JournalEntryIDs) != 4 {
 		t.Fatalf("expected exact offsets for original and correction journals: %#v", txn)
+	}
+	if len(txn.Reversals) != 1 {
+		t.Fatalf("transaction reversal retry duplicated audit rows: %#v", txn.Reversals)
 	}
 	if retry, _, err := s.ReverseBankTransaction(ctx, txn.ID, "classification needs to be redone", ""); err != nil || len(retry.JournalEntryIDs) != 4 {
 		t.Fatalf("reversal retry was not idempotent: %#v err=%v", retry, err)
@@ -350,6 +424,45 @@ func TestBankReclassificationDoesNotTreatHistoricalStateAsCurrentIdempotency(t *
 	retry, _, err := s.ReclassifyBankTransaction(ctx, txn.ID, secondExpense.ID, "receipt review")
 	if err != nil || len(retry.Reclassifications) != 3 {
 		t.Fatalf("last exact current operation was not idempotent: %#v err=%v", retry, err)
+	}
+}
+
+func TestBankTransactionReverseFailsWithoutResolvableLiveJournals(t *testing.T) {
+	s, ctx := newTestStore(t)
+	bank := mustRoleAccount(t, s, ctx, "1010", "Bank", AccountAsset, AccountRoleBankAccount)
+	expense := mustRoleAccount(t, s, ctx, "6000", "Expense", AccountExpense, AccountRoleDefaultExpense)
+	statement, _, _ := s.ImportBankStatement(ctx, bankStatementFixture(bank, "missing-live", 0, -100))
+	txn, _, _ := s.ImportBankTransaction(ctx, bankTransactionFixture(statement, "missing-live-txn", "2026-06-10", -100))
+	txn, _, _ = s.PostBankTransaction(ctx, txn.ID, expense.ID)
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn.ActiveJournalEntryIDs = nil
+	root, err := s.appendEventAt(ctx, "bank.transaction", txn.ID, "test corrupt live links", wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: txn}), st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.ReverseBankTransaction(ctx, txn.ID, "must fail closed", ""); err == nil {
+		t.Fatal("expected reversal without live journal links to fail")
+	}
+	txn.ActiveJournalEntryIDs = []string{txn.JournalEntryIDs[0], "jrnl:missing"}
+	if _, err := s.appendEventAt(ctx, "bank.transaction", txn.ID, "test missing live journal", wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: txn}), root); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.ReverseBankTransaction(ctx, txn.ID, "must fail closed", ""); err == nil {
+		t.Fatal("expected reversal with an unresolvable live journal to fail")
+	}
+	after, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.JournalEntries) != len(before.JournalEntries) {
+		t.Fatalf("reversal wrote an offset before verifying all live journals: before=%d after=%d", len(before.JournalEntries), len(after.JournalEntries))
 	}
 }
 
@@ -426,6 +539,78 @@ func TestBankTransferPairingHandlesBankAndCreditCardWithoutIncomeOrExpense(t *te
 		report, err := s.PreviewBankReconciliation(ctx, statementID)
 		if err != nil || !report.CanComplete {
 			t.Fatalf("repaired transfer did not reconcile statement %s: %#v err=%v", statementID, report, err)
+		}
+	}
+}
+
+func TestBankTransferPairsAndReversesAcrossAdjacentStatementPeriods(t *testing.T) {
+	s, ctx := newTestStore(t)
+	fromAccount := mustRoleAccount(t, s, ctx, "1010", "Checking", AccountAsset, AccountRoleBankAccount)
+	toAccount := mustAccount(t, s, ctx, "Savings", AccountAsset)
+	if _, _, err := s.SetAccountRole(ctx, toAccount.ID, AccountRoleBankAccount); err != nil {
+		t.Fatal(err)
+	}
+	clearing := mustRoleAccount(t, s, ctx, "1090", "Transfer Clearing", AccountAsset, AccountRoleTransferClearing)
+	fromInput := bankStatementFixture(fromAccount, "jan-transfer", 0, -100)
+	fromInput.PeriodStart, fromInput.PeriodEnd = "2026-01-01", "2026-01-31"
+	toInput := bankStatementFixture(toAccount, "feb-transfer", 0, 100)
+	toInput.PeriodStart, toInput.PeriodEnd = "2026-02-01", "2026-02-28"
+	fromStatement, _, err := s.ImportBankStatement(ctx, fromInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toStatement, _, err := s.ImportBankStatement(ctx, toInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromTxn, _, _ := s.ImportBankTransaction(ctx, bankTransactionFixture(fromStatement, "jan-31-out", "2026-01-31", -100))
+	toTxn, _, _ := s.ImportBankTransaction(ctx, bankTransactionFixture(toStatement, "feb-1-in", "2026-02-01", 100))
+	paired, _, err := s.PairBankTransfer(ctx, fromTxn.ID, toTxn.ID)
+	if err != nil {
+		t.Fatalf("ordinary adjacent-period transfer failed: %v", err)
+	}
+	if len(paired[0].ActiveJournalEntryIDs) != 2 || len(paired[0].TransferHistory[0].JournalEntryIDs) != 2 {
+		t.Fatalf("cross-period transfer did not retain both leg journals: %#v", paired)
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dates := map[string]bool{}
+	semantics := map[string]bool{}
+	for _, journalID := range paired[0].ActiveJournalEntryIDs {
+		entry := st.JournalEntries[journalID]
+		dates[entry.Date] = true
+		semantics[entry.PostingSemantics] = true
+		foundClearing := false
+		for _, posting := range entry.Postings {
+			foundClearing = foundClearing || posting.AccountID == clearing.ID
+		}
+		if !foundClearing {
+			t.Fatalf("cross-period transfer leg did not use clearing: %#v", entry)
+		}
+	}
+	if !dates["2026-01-31"] || !dates["2026-02-01"] || !semantics["book_account_transfer_from"] || !semantics["book_account_transfer_to"] {
+		t.Fatalf("cross-period transfer legs used unsafe dates or semantics: dates=%#v semantics=%#v", dates, semantics)
+	}
+	for _, statementID := range []string{fromStatement.ID, toStatement.ID} {
+		report, err := s.PreviewBankReconciliation(ctx, statementID)
+		if err != nil || !report.CanComplete {
+			t.Fatalf("cross-period transfer did not reconcile statement %s: %#v err=%v", statementID, report, err)
+		}
+	}
+	reversed, _, err := s.ReverseBankTransfer(ctx, fromTxn.ID, toTxn.ID, "wrong pair", "")
+	if err != nil || len(reversed[0].TransferHistory[0].ReversalJournalEntryIDs) != 2 {
+		t.Fatalf("cross-period transfer reversal failed: %#v err=%v", reversed, err)
+	}
+	repaired, _, err := s.PairBankTransfer(ctx, fromTxn.ID, toTxn.ID)
+	if err != nil || repaired[0].TransferVersion != 2 {
+		t.Fatalf("cross-period transfer could not be re-paired: %#v err=%v", repaired, err)
+	}
+	for _, statementID := range []string{fromStatement.ID, toStatement.ID} {
+		report, err := s.PreviewBankReconciliation(ctx, statementID)
+		if err != nil || !report.CanComplete {
+			t.Fatalf("re-paired cross-period transfer did not reconcile statement %s: %#v err=%v", statementID, report, err)
 		}
 	}
 }
