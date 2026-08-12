@@ -4,7 +4,29 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/kyle-visner/jaybase"
 )
+
+type failBankDocumentAppendOnceBackend struct {
+	storageBackend
+	command string
+	failed  bool
+}
+
+func (b *failBankDocumentAppendOnceBackend) AppendAt(ctx jaybase.Context, options jaybase.AppendOptions, expectedRoot string) (string, error) {
+	if !b.failed && options.Command == b.command {
+		b.failed = true
+		if _, err := b.storageBackend.AppendAt(ctx, jaybase.AppendOptions{
+			Type: "martin.concurrent", Command: "injected concurrent foreign append",
+			Payload: map[string]string{"during": b.command}, CreatedAt: options.CreatedAt,
+		}, expectedRoot); err != nil {
+			return "", err
+		}
+		return "", &jaybase.AppError{Code: jaybase.ErrConflict, Message: "injected stale root after workflow journal append"}
+	}
+	return b.storageBackend.AppendAt(ctx, options, expectedRoot)
+}
 
 func bankStatementFixture(account Account, id string, opening, closing int64) BankStatement {
 	return BankStatement{
@@ -95,6 +117,130 @@ func TestBankTransactionsPostIdempotentlyWithoutJournalAdjustAndReconcile(t *tes
 	}
 }
 
+func TestFirstStatementCreatesGuardedOpeningBalanceWithoutJournalAdjust(t *testing.T) {
+	s, owner := newTestStore(t)
+	bank := mustRoleAccount(t, s, owner, "1010", "Opening Bank", AccountAsset, AccountRoleBankAccount)
+	equity := mustRoleAccount(t, s, owner, "3900", "Opening Balance Equity", AccountEquity, AccountRoleOpeningBalanceEquity)
+	if _, err := s.UpsertUser(owner, User{ID: "bookkeeper", Role: "Accountant"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := Context{Actor: "bookkeeper"}
+	input := bankStatementFixture(bank, "first-opening", 12500, 12500)
+	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: "bank statement import"}
+	s.db = backend
+	if _, _, err := s.ImportBankStatement(ctx, input); err == nil {
+		t.Fatal("expected injected statement append failure after opening journal")
+	}
+	statement, _, err := s.ImportBankStatement(ctx, input)
+	if err != nil {
+		t.Fatalf("ledger:write actor could not establish guarded opening balance: %v", err)
+	}
+	if statement.OpeningJournalEntryID == "" {
+		t.Fatalf("statement did not retain opening journal: %#v", statement)
+	}
+	retry, _, err := s.ImportBankStatement(ctx, input)
+	if err != nil || retry.OpeningJournalEntryID != statement.OpeningJournalEntryID {
+		t.Fatalf("opening balance retry was not idempotent: %#v err=%v", retry, err)
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := st.JournalEntries[statement.OpeningJournalEntryID]
+	if entry.Workflow != "bank.statement.opening_balance" || entry.Origin != JournalOriginWorkflow || entry.Date != "2026-05-31" {
+		t.Fatalf("unexpected opening workflow journal: %#v", entry)
+	}
+	if len(entry.Postings) != 2 || entry.Postings[0].AccountID != bank.ID || entry.Postings[1].AccountID != equity.ID {
+		t.Fatalf("unexpected opening balance postings: %#v", entry.Postings)
+	}
+	report, err := s.PreviewBankReconciliation(ctx, statement.ID)
+	if err != nil || !report.CanComplete || report.LedgerBalanceCents != 12500 {
+		t.Fatalf("opening statement did not reconcile: %#v err=%v", report, err)
+	}
+}
+
+func TestBankMultiEventWorkflowRecoversAfterStaleRootWithoutDuplicateJournal(t *testing.T) {
+	s, ctx := newTestStore(t)
+	bank := mustRoleAccount(t, s, ctx, "1010", "Bank", AccountAsset, AccountRoleBankAccount)
+	expense := mustRoleAccount(t, s, ctx, "6000", "Expense", AccountExpense, AccountRoleDefaultExpense)
+	statement, _, err := s.ImportBankStatement(ctx, bankStatementFixture(bank, "stale-root", 0, -500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn, _, err := s.ImportBankTransaction(ctx, bankTransactionFixture(statement, "stale-root-txn", "2026-06-10", -500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: "bank transaction post"}
+	s.db = backend
+	if _, _, err := s.PostBankTransaction(ctx, txn.ID, expense.ID); err == nil {
+		t.Fatal("expected injected stale-root failure after journal append")
+	}
+	partial, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(partial.JournalEntries) != 1 || partial.BankTransactions[txn.ID].Status != BankTransactionStaged {
+		t.Fatalf("unexpected partial workflow state: %#v", partial)
+	}
+	posted, _, err := s.PostBankTransaction(ctx, txn.ID, expense.ID)
+	if err != nil {
+		t.Fatalf("retry did not recover partial workflow: %v", err)
+	}
+	final, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if posted.Status != BankTransactionPosted || len(final.JournalEntries) != 1 || len(posted.JournalEntryIDs) != 1 {
+		t.Fatalf("recovery duplicated or failed to link the workflow journal: transaction=%#v journals=%#v", posted, final.JournalEntries)
+	}
+}
+
+func TestBankTransferPairAndReverseRecoverPartialWorkflowWrites(t *testing.T) {
+	s, ctx := newTestStore(t)
+	fromAccount := mustRoleAccount(t, s, ctx, "1010", "From Bank", AccountAsset, AccountRoleBankAccount)
+	toAccount := mustAccount(t, s, ctx, "Savings", AccountAsset)
+	if _, _, err := s.SetAccountRole(ctx, toAccount.ID, AccountRoleBankAccount); err != nil {
+		t.Fatal(err)
+	}
+	fromStatement, _, _ := s.ImportBankStatement(ctx, bankStatementFixture(fromAccount, "partial-from", 0, -100))
+	toInput := bankStatementFixture(toAccount, "partial-to", 0, 100)
+	toStatement, _, err := s.ImportBankStatement(ctx, toInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromTxn, _, _ := s.ImportBankTransaction(ctx, bankTransactionFixture(fromStatement, "partial-from-txn", "2026-06-10", -100))
+	toTxn, _, _ := s.ImportBankTransaction(ctx, bankTransactionFixture(toStatement, "partial-to-txn", "2026-06-10", 100))
+	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: "bank transfer pair"}
+	s.db = backend
+	if _, _, err := s.PairBankTransfer(ctx, fromTxn.ID, toTxn.ID); err == nil {
+		t.Fatal("expected injected transfer-pair document append failure")
+	}
+	paired, _, err := s.PairBankTransfer(ctx, fromTxn.ID, toTxn.ID)
+	if err != nil {
+		t.Fatalf("transfer pair retry did not recover: %v", err)
+	}
+	if len(paired) != 2 || paired[0].Status != BankTransactionPaired {
+		t.Fatalf("unexpected recovered transfer: %#v", paired)
+	}
+	backend.command = "bank transfer reverse"
+	backend.failed = false
+	if _, _, err := s.ReverseBankTransfer(ctx, fromTxn.ID, toTxn.ID, "wrong match", ""); err == nil {
+		t.Fatal("expected injected transfer-reverse document append failure")
+	}
+	reversed, _, err := s.ReverseBankTransfer(ctx, fromTxn.ID, toTxn.ID, "wrong match", "")
+	if err != nil {
+		t.Fatalf("transfer reverse retry did not recover: %v", err)
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reversed[0].Status != BankTransactionStaged || reversed[1].Status != BankTransactionStaged || len(st.JournalEntries) != 2 {
+		t.Fatalf("partial transfer recovery duplicated journals or state: reversed=%#v journals=%#v", reversed, st.JournalEntries)
+	}
+}
+
 func TestBankTransactionCorrectionsPreserveHistoryAndExactlyReverse(t *testing.T) {
 	s, ctx := newTestStore(t)
 	bank := mustRoleAccount(t, s, ctx, "1010", "Bank", AccountAsset, AccountRoleBankAccount)
@@ -124,18 +270,21 @@ func TestBankTransactionCorrectionsPreserveHistoryAndExactlyReverse(t *testing.T
 		t.Fatalf("reclassification retry was not idempotent: %#v err=%v", retry, err)
 	}
 	reclassJournalID := txn.Reclassifications[0].JournalID
+	if _, _, err := s.ReverseBankTransaction(ctx, txn.ID, "classification needs to be redone", "2026-06-15"); err == nil {
+		t.Fatal("expected out-of-period-risk reversal date to fail closed")
+	}
 	before, err := s.LoadState()
 	if err != nil {
 		t.Fatal(err)
 	}
-	txn, _, err = s.ReverseBankTransaction(ctx, txn.ID, "card purchase was voided", "2026-06-15")
+	txn, _, err = s.ReverseBankTransaction(ctx, txn.ID, "classification needs to be redone", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if txn.Status != BankTransactionReversed || len(txn.JournalEntryIDs) != 4 {
+	if txn.Status != BankTransactionStaged || txn.ClassificationAccount != "" || len(txn.JournalEntryIDs) != 4 {
 		t.Fatalf("expected exact offsets for original and correction journals: %#v", txn)
 	}
-	if retry, _, err := s.ReverseBankTransaction(ctx, txn.ID, "card purchase was voided", "2026-06-15"); err != nil || len(retry.JournalEntryIDs) != 4 {
+	if retry, _, err := s.ReverseBankTransaction(ctx, txn.ID, "classification needs to be redone", ""); err != nil || len(retry.JournalEntryIDs) != 4 {
 		t.Fatalf("reversal retry was not idempotent: %#v err=%v", retry, err)
 	}
 	after, err := s.LoadState()
@@ -160,12 +309,55 @@ func TestBankTransactionCorrectionsPreserveHistoryAndExactlyReverse(t *testing.T
 			}
 		}
 	}
+	if _, _, err := s.PostBankTransaction(ctx, txn.ID, newExpense.ID); err != nil {
+		t.Fatalf("reversed transaction could not be corrected and reposted: %v", err)
+	}
+	report, err := s.PreviewBankReconciliation(ctx, statement.ID)
+	if err != nil || !report.CanComplete {
+		t.Fatalf("corrected transaction did not reconcile cleanly: %#v err=%v", report, err)
+	}
+}
+
+func TestBankReclassificationDoesNotTreatHistoricalStateAsCurrentIdempotency(t *testing.T) {
+	s, ctx := newTestStore(t)
+	bank := mustRoleAccount(t, s, ctx, "1010", "Bank", AccountAsset, AccountRoleBankAccount)
+	firstExpense := mustRoleAccount(t, s, ctx, "6000", "Supplies", AccountExpense, AccountRoleDefaultExpense)
+	secondExpense := mustAccount(t, s, ctx, "Travel", AccountExpense)
+	statement, _, err := s.ImportBankStatement(ctx, bankStatementFixture(bank, "reclass-cycle", 0, -100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn, _, _ := s.ImportBankTransaction(ctx, bankTransactionFixture(statement, "cycle", "2026-06-10", -100))
+	txn, _, err = s.PostBankTransaction(ctx, txn.ID, firstExpense.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn, _, err = s.ReclassifyBankTransaction(ctx, txn.ID, secondExpense.ID, "receipt review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn, _, err = s.ReclassifyBankTransaction(ctx, txn.ID, firstExpense.ID, "manager correction")
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn, _, err = s.ReclassifyBankTransaction(ctx, txn.ID, secondExpense.ID, "receipt review")
+	if err != nil {
+		t.Fatalf("historical target/reason should execute again when it is not current: %v", err)
+	}
+	if txn.ClassificationAccount != secondExpense.ID || len(txn.Reclassifications) != 3 {
+		t.Fatalf("historical reclassification was incorrectly treated as a no-op: %#v", txn)
+	}
+	retry, _, err := s.ReclassifyBankTransaction(ctx, txn.ID, secondExpense.ID, "receipt review")
+	if err != nil || len(retry.Reclassifications) != 3 {
+		t.Fatalf("last exact current operation was not idempotent: %#v err=%v", retry, err)
+	}
 }
 
 func TestBankTransferPairingHandlesBankAndCreditCardWithoutIncomeOrExpense(t *testing.T) {
 	s, ctx := newTestStore(t)
 	bank := mustRoleAccount(t, s, ctx, "1010", "Bank", AccountAsset, AccountRoleBankAccount)
 	card := mustRoleAccount(t, s, ctx, "2010", "Credit Card", AccountLiability, AccountRoleCreditCard)
+	mustRoleAccount(t, s, ctx, "3900", "Opening Balance Equity", AccountEquity, AccountRoleOpeningBalanceEquity)
 	bankStatement, _, err := s.ImportBankStatement(ctx, bankStatementFixture(bank, "bank-transfer", 10000, 5000))
 	if err != nil {
 		t.Fatal(err)
@@ -186,6 +378,9 @@ func TestBankTransferPairingHandlesBankAndCreditCardWithoutIncomeOrExpense(t *te
 	if len(paired) != 2 || paired[0].Status != BankTransactionPaired || paired[1].Status != BankTransactionPaired {
 		t.Fatalf("unexpected transfer pair: %#v", paired)
 	}
+	if paired[0].TransferDirection == paired[1].TransferDirection || paired[0].TransferDirection == "" || paired[1].TransferDirection == "" {
+		t.Fatalf("economic transfer direction was not persisted: %#v", paired)
+	}
 	retry, _, err := s.PairBankTransfer(ctx, bankTxn.ID, cardTxn.ID)
 	if err != nil || len(retry) != 2 {
 		t.Fatalf("transfer retry was not idempotent: %#v err=%v", retry, err)
@@ -194,17 +389,43 @@ func TestBankTransferPairingHandlesBankAndCreditCardWithoutIncomeOrExpense(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st.JournalEntries) != 1 {
-		t.Fatalf("transfer created duplicate or extra journals: %#v", st.JournalEntries)
-	}
+	pairJournals := 0
 	for _, entry := range st.JournalEntries {
-		if entry.Workflow != "bank.transfer.pair" || len(entry.Postings) != 2 {
-			t.Fatalf("unexpected transfer journal: %#v", entry)
+		if entry.Workflow != "bank.transfer.pair" {
+			continue
 		}
+		pairJournals++
 		for _, posting := range entry.Postings {
 			if posting.AccountID != bank.ID && posting.AccountID != card.ID {
 				t.Fatalf("transfer journal used income/expense account: %#v", entry)
 			}
+		}
+	}
+	if pairJournals != 1 {
+		t.Fatalf("transfer retry created duplicate pair journals: %#v", st.JournalEntries)
+	}
+	if _, _, err := s.ReverseBankTransfer(ctx, bankTxn.ID, cardTxn.ID, "paired the wrong source rows", "2026-06-30"); err == nil {
+		t.Fatal("expected transfer reversal on a different accounting date to fail closed")
+	}
+	reversed, _, err := s.ReverseBankTransfer(ctx, bankTxn.ID, cardTxn.ID, "paired the wrong source rows", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reversed[0].Status != BankTransactionStaged || reversed[1].Status != BankTransactionStaged ||
+		reversed[0].TransferTransactionID != "" || reversed[1].TransferTransactionID != "" {
+		t.Fatalf("transfer reversal did not return both legs to staged state: %#v", reversed)
+	}
+	if retry, _, err := s.ReverseBankTransfer(ctx, bankTxn.ID, cardTxn.ID, "paired the wrong source rows", ""); err != nil || len(retry) != 2 {
+		t.Fatalf("transfer reversal retry was not idempotent: %#v err=%v", retry, err)
+	}
+	repaired, _, err := s.PairBankTransfer(ctx, bankTxn.ID, cardTxn.ID)
+	if err != nil || repaired[0].TransferVersion != 2 || repaired[1].TransferVersion != 2 {
+		t.Fatalf("reversed transfer could not be safely re-paired: %#v err=%v", repaired, err)
+	}
+	for _, statementID := range []string{bankStatement.ID, cardStatement.ID} {
+		report, err := s.PreviewBankReconciliation(ctx, statementID)
+		if err != nil || !report.CanComplete {
+			t.Fatalf("repaired transfer did not reconcile statement %s: %#v err=%v", statementID, report, err)
 		}
 	}
 }

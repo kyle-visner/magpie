@@ -784,6 +784,14 @@ Import a statement and one transaction:
   --transaction-id btxn:... --account-id acct:EXPENSE_ID
 ```
 
+When the first statement for an otherwise unused account has a nonzero opening
+balance, import creates a guarded `bank.statement.opening_balance` workflow
+journal dated one day before the period. This requires a configured
+`opening_balance_equity` account and only `ledger:write`; it never uses
+`journal:adjust`. Magpie creates no opening adjustment when the account already
+has ledger activity or a prior statement, so an unexplained mismatch remains a
+reconciliation blocker instead of being forced into balance.
+
 A canonical transaction includes `statement_id`, the same `account_id` and
 `currency` as its statement, `date`, nonzero signed `amount_cents`, and a
 stable `external_refs` identity. Imports are staged. Pending rows cannot be
@@ -809,12 +817,30 @@ Corrections append journals and retain the original decision:
 ./magpie --store .magpie --actor bookkeeping-agent bank transaction reclassify \
   --transaction-id btxn:... --account-id acct:NEW_EXPENSE_ID --reason "receipt reviewed"
 ./magpie --store .magpie --actor bookkeeping-agent bank transaction reverse \
-  --transaction-id btxn:... --date 2026-06-20 --reason "source transaction was voided"
+  --transaction-id btxn:... --reason "classification needs to be redone"
 ```
 
 Reclassification moves the classification between accounts without changing
-the bank posting. Reversal creates exact offsetting workflow journals. Neither
-operation edits or deletes an earlier event.
+the bank posting. Transaction reversal creates exact offsets for the current
+posting and its reclassifications, then returns the source row to `staged` so it
+can be classified and posted again. The reversal date defaults to and must
+equal the source transaction date; this prevents an in-period posting from
+being offset only in a later period. Neither operation edits or deletes an
+earlier event.
+
+An incorrect transfer pair is also correctable without editing history:
+
+```sh
+./magpie --store .magpie --actor bookkeeping-agent bank transfer reverse \
+  --from-transaction-id btxn:... --to-transaction-id btxn:... \
+  --reason "paired the wrong statement rows"
+```
+
+Transfer reversal exactly offsets the pair journal and returns both legs to
+`staged`. They can then be paired correctly or posted through another supported
+workflow. The original economic `from` and `to` directions, pair journal, and
+reversal audit details remain in each transaction's history. Its date defaults
+to and must equal the original transfer journal date.
 
 Preview before completing reconciliation:
 
@@ -973,6 +999,19 @@ invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --
 invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
 invoice get --invoice-id ID
 invoice list
+payout import-json --file payout.json
+payout get --payout-id ID
+payout list
+bank statement import-json --file statement.json
+bank transaction import-json --file transaction.json
+bank transaction post --transaction-id ID --account-id ID
+bank transaction reverse --transaction-id ID --reason REASON [--date YYYY-MM-DD]
+bank transaction reclassify --transaction-id ID --account-id ID --reason REASON
+bank transaction list
+bank transfer pair --from-transaction-id ID --to-transaction-id ID
+bank transfer reverse --from-transaction-id ID --to-transaction-id ID --reason REASON [--date YYYY-MM-DD]
+bank reconciliation preview --statement-id ID
+bank reconciliation complete --statement-id ID
 rbac defaults repair
 rbac permissions
 rbac role set --name NAME --permissions p1,p2

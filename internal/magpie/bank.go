@@ -46,10 +46,50 @@ func (s *Store) ImportBankStatement(ctx Context, statement BankStatement) (BankS
 		}
 		return existing, st.Root, nil
 	}
+	root := st.Root
+	openingSourceKey := "bank_statement:" + statement.ID + ":opening_balance"
+	if journalID, ok := st.SourceKeys[openingSourceKey]; ok {
+		statement.OpeningJournalEntryID = journalID
+	} else {
+		balance, hasActivity, err := accountBalanceBefore(st, st.Accounts[statement.AccountID], statement.PeriodStart)
+		if err != nil {
+			return BankStatement{}, "", err
+		}
+		if balance != statement.OpeningBalanceCents && !hasActivity && !hasStatementForAccount(st, statement.AccountID) {
+			openingEquityID, err := accountIDByRole(st, AccountRoleOpeningBalanceEquity)
+			if err != nil {
+				return BankStatement{}, "", appErr(ErrValidation, "first statement with nonzero opening balance requires account role %q", AccountRoleOpeningBalanceEquity)
+			}
+			postings, err := openingBalancePostings(st.Accounts[statement.AccountID], openingEquityID, statement.OpeningBalanceCents)
+			if err != nil {
+				return BankStatement{}, "", err
+			}
+			openingDate, err := dayBefore(statement.PeriodStart)
+			if err != nil {
+				return BankStatement{}, "", err
+			}
+			entry, newRoot, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
+				Date:               openingDate,
+				Memo:               "Statement opening balance " + statement.ID,
+				Workflow:           "bank.statement.opening_balance",
+				PostingSemantics:   "statement_opening_balance",
+				SourceDocumentType: "bank_statement",
+				SourceDocumentID:   statement.ID,
+				Source:             "bank_statement",
+				SourceKey:          statement.ID + ":opening_balance",
+				Postings:           postings,
+			})
+			if err != nil {
+				return BankStatement{}, "", err
+			}
+			statement.OpeningJournalEntryID = entry.ID
+			root = newRoot
+		}
+	}
 	statement.Status = ReconciliationOpen
 	statement.CreatedAt = s.now().UTC()
 	statement.CreatedBy = ctx.Actor
-	root, err := s.appendEventAt(ctx, "bank.statement", statement.ID, "bank statement import", wrapEvent("bank.statement.create", bankStatementPayload{Statement: statement}), st.Root)
+	root, err = s.appendEventAt(ctx, "bank.statement", statement.ID, "bank statement import", wrapEvent("bank.statement.create", bankStatementPayload{Statement: statement}), root)
 	return statement, root, err
 }
 
@@ -119,6 +159,7 @@ func (s *Store) PostBankTransaction(ctx Context, transactionID, classificationAc
 	if err != nil {
 		return BankTransaction{}, "", err
 	}
+	nextPostingVersion := transaction.PostingVersion + 1
 	entry, root, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
 		Date:               transaction.Date,
 		Memo:               "Bank transaction " + transaction.ID,
@@ -127,7 +168,7 @@ func (s *Store) PostBankTransaction(ctx Context, transactionID, classificationAc
 		SourceDocumentType: "bank_transaction",
 		SourceDocumentID:   transaction.ID,
 		Source:             "bank_transaction",
-		SourceKey:          transaction.ID + ":post",
+		SourceKey:          transaction.ID + ":post:" + int64String(int64(nextPostingVersion)),
 		Postings:           []Posting{bankPosting, counterPosting},
 		Metadata: map[string]string{
 			"bank_transaction_id": transaction.ID,
@@ -139,7 +180,10 @@ func (s *Store) PostBankTransaction(ctx Context, transactionID, classificationAc
 	}
 	transaction.Status = BankTransactionPosted
 	transaction.ClassificationAccount = counter.ID
-	transaction.JournalEntryIDs = []string{entry.ID}
+	transaction.PostingVersion = nextPostingVersion
+	transaction.JournalEntryIDs = appendUniqueString(transaction.JournalEntryIDs, entry.ID)
+	transaction.ActiveJournalEntryIDs = []string{entry.ID}
+	transaction.ReversalReason = ""
 	transaction.UpdatedAt = s.now().UTC()
 	transaction.UpdatedBy = ctx.Actor
 	root, err = s.appendEventAt(ctx, "bank.transaction", transaction.ID, "bank transaction post", wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: transaction}), root)
@@ -159,24 +203,31 @@ func (s *Store) ReverseBankTransaction(ctx Context, transactionID, reason, date 
 		return BankTransaction{}, "", err
 	}
 	reason = strings.TrimSpace(reason)
-	if transaction.Status == BankTransactionReversed {
-		if transaction.ReversalReason != reason {
-			return BankTransaction{}, "", appErr(ErrConflict, "bank transaction %s was already reversed for a different reason", transaction.ID)
+	if reason == "" {
+		return BankTransaction{}, "", appErr(ErrValidation, "bank transaction reversal reason is required")
+	}
+	date, err = normalizeBankDate(date, transaction.Date, "reversal date")
+	if err != nil {
+		return BankTransaction{}, "", err
+	}
+	if date != transaction.Date {
+		return BankTransaction{}, "", appErr(ErrValidation, "bank transaction reversal date must equal the source transaction date %s", transaction.Date)
+	}
+	if transaction.Status == BankTransactionStaged && len(transaction.Reversals) > 0 {
+		last := transaction.Reversals[len(transaction.Reversals)-1]
+		if last.Reason == reason && last.Date == date {
+			return transaction, st.Root, nil
 		}
-		return transaction, st.Root, nil
 	}
 	if transaction.Status != BankTransactionPosted {
 		return BankTransaction{}, "", appErr(ErrConflict, "only a posted bank transaction can be reversed")
 	}
-	if reason == "" {
-		return BankTransaction{}, "", appErr(ErrValidation, "bank transaction reversal reason is required")
-	}
-	date, err = normalizeBankDate(date, s.now().UTC().Format("2006-01-02"), "reversal date")
-	if err != nil {
-		return BankTransaction{}, "", err
-	}
 	root := st.Root
-	originalJournalIDs := append([]string(nil), transaction.JournalEntryIDs...)
+	originalJournalIDs := append([]string(nil), transaction.ActiveJournalEntryIDs...)
+	if len(originalJournalIDs) == 0 {
+		originalJournalIDs = append([]string(nil), transaction.JournalEntryIDs...)
+	}
+	reversalJournalIDs := make([]string, 0, len(originalJournalIDs))
 	for _, journalID := range originalJournalIDs {
 		original, ok := st.JournalEntries[journalID]
 		if !ok {
@@ -184,13 +235,13 @@ func (s *Store) ReverseBankTransaction(ctx Context, transactionID, reason, date 
 		}
 		entry, newRoot, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
 			Date:               date,
-			Memo:               "Bank transaction reversed " + transaction.ID,
+			Memo:               "Bank transaction reversed " + transaction.ID + ": " + reason,
 			Workflow:           "bank.transaction.reverse",
 			PostingSemantics:   "bank_transaction_reversed",
 			SourceDocumentType: "bank_transaction",
 			SourceDocumentID:   transaction.ID,
 			Source:             "bank_transaction",
-			SourceKey:          transaction.ID + ":reverse:" + journalID,
+			SourceKey:          transaction.ID + ":reverse:" + int64String(int64(transaction.PostingVersion)) + ":" + journalID,
 			Postings:           reversePostings(original.Postings),
 			Metadata: map[string]string{
 				"original_journal_entry_id": journalID,
@@ -201,10 +252,18 @@ func (s *Store) ReverseBankTransaction(ctx Context, transactionID, reason, date 
 			return BankTransaction{}, "", err
 		}
 		root = newRoot
-		transaction.JournalEntryIDs = append(transaction.JournalEntryIDs, entry.ID)
+		transaction.JournalEntryIDs = appendUniqueString(transaction.JournalEntryIDs, entry.ID)
+		reversalJournalIDs = append(reversalJournalIDs, entry.ID)
 	}
-	transaction.Status = BankTransactionReversed
+	transaction.Status = BankTransactionStaged
+	transaction.ClassificationAccount = ""
+	transaction.ActiveJournalEntryIDs = nil
 	transaction.ReversalReason = reason
+	transaction.Reversals = append(transaction.Reversals, BankTransactionReversal{
+		Reason: reason, Date: date,
+		OriginalJournalEntryIDs: originalJournalIDs, ReversalJournalEntryIDs: reversalJournalIDs,
+		CreatedAt: s.now().UTC(), CreatedBy: ctx.Actor,
+	})
 	transaction.UpdatedAt = s.now().UTC()
 	transaction.UpdatedBy = ctx.Actor
 	root, err = s.appendEventAt(ctx, "bank.transaction", transaction.ID, "bank transaction reverse", wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: transaction}), root)
@@ -231,12 +290,13 @@ func (s *Store) ReclassifyBankTransaction(ctx Context, transactionID, accountID,
 		return BankTransaction{}, "", appErr(ErrValidation, "bank transaction reclassification reason is required")
 	}
 	accountID = strings.TrimSpace(accountID)
-	for _, existing := range transaction.Reclassifications {
-		if existing.ToAccountID == accountID && existing.Reason == reason {
-			return transaction, st.Root, nil
-		}
-	}
 	if accountID == transaction.ClassificationAccount {
+		if len(transaction.Reclassifications) > 0 {
+			last := transaction.Reclassifications[len(transaction.Reclassifications)-1]
+			if last.ToAccountID == accountID && last.Reason == reason {
+				return transaction, st.Root, nil
+			}
+		}
 		return BankTransaction{}, "", appErr(ErrValidation, "new classification account must differ from the current account")
 	}
 	newAccount, err := validateBankClassification(st, transaction, accountID)
@@ -263,13 +323,13 @@ func (s *Store) ReclassifyBankTransaction(ctx Context, transactionID, accountID,
 	}
 	entry, root, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
 		Date:               transaction.Date,
-		Memo:               "Bank transaction reclassified " + transaction.ID,
+		Memo:               "Bank transaction reclassified " + transaction.ID + ": " + reason,
 		Workflow:           "bank.transaction.reclassify",
 		PostingSemantics:   "bank_transaction_reclassified",
 		SourceDocumentType: "bank_transaction",
 		SourceDocumentID:   transaction.ID,
 		Source:             "bank_transaction",
-		SourceKey:          transaction.ID + ":reclassify:" + oldAccount.ID + ":" + newAccount.ID + ":" + makeID("reason", reason),
+		SourceKey:          transaction.ID + ":reclassify:" + int64String(int64(transaction.PostingVersion)) + ":" + int64String(int64(len(transaction.Reclassifications)+1)),
 		Postings:           postings,
 		Metadata: map[string]string{
 			"from_account_id": oldAccount.ID,
@@ -289,7 +349,8 @@ func (s *Store) ReclassifyBankTransaction(ctx Context, transactionID, accountID,
 		CreatedBy:     ctx.Actor,
 	})
 	transaction.ClassificationAccount = newAccount.ID
-	transaction.JournalEntryIDs = append(transaction.JournalEntryIDs, entry.ID)
+	transaction.JournalEntryIDs = appendUniqueString(transaction.JournalEntryIDs, entry.ID)
+	transaction.ActiveJournalEntryIDs = appendUniqueString(transaction.ActiveJournalEntryIDs, entry.ID)
 	transaction.UpdatedAt = s.now().UTC()
 	transaction.UpdatedBy = ctx.Actor
 	root, err = s.appendEventAt(ctx, "bank.transaction", transaction.ID, "bank transaction reclassify", wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: transaction}), root)
@@ -327,6 +388,12 @@ func (s *Store) PairBankTransfer(ctx Context, firstID, secondID string) ([]BankT
 	if first.Currency != second.Currency {
 		return nil, "", appErr(ErrValidation, "transfer transaction currencies must match")
 	}
+	firstStatement := st.BankStatements[first.StatementID]
+	secondStatement := st.BankStatements[second.StatementID]
+	if first.Date < firstStatement.PeriodStart || first.Date > firstStatement.PeriodEnd ||
+		second.Date < secondStatement.PeriodStart || second.Date > secondStatement.PeriodEnd {
+		return nil, "", appErr(ErrValidation, "transfer transactions must fall within their own statement periods")
+	}
 	firstAccount := st.Accounts[first.AccountID]
 	secondAccount := st.Accounts[second.AccountID]
 	if firstAccount.ID == secondAccount.ID {
@@ -340,8 +407,14 @@ func (s *Store) PairBankTransfer(ctx Context, firstID, secondID string) ([]BankT
 	if err != nil {
 		return nil, "", err
 	}
-	firstAmount, _ := absoluteCents(first.AmountCents)
-	secondAmount, _ := absoluteCents(second.AmountCents)
+	firstAmount, err := absoluteCents(first.AmountCents)
+	if err != nil {
+		return nil, "", err
+	}
+	secondAmount, err := absoluteCents(second.AmountCents)
+	if err != nil {
+		return nil, "", err
+	}
 	if firstAmount != secondAmount || (firstPosting.Debit > 0) == (secondPosting.Debit > 0) {
 		return nil, "", appErr(ErrValidation, "transfer transactions must have equal amounts and opposite ledger effects")
 	}
@@ -353,15 +426,26 @@ func (s *Store) PairBankTransfer(ctx Context, firstID, secondID string) ([]BankT
 	}
 	ids := []string{first.ID, second.ID}
 	sort.Strings(ids)
+	postingDate := laterDate(first.Date, second.Date)
+	if postingDate < firstStatement.PeriodStart || postingDate > firstStatement.PeriodEnd ||
+		postingDate < secondStatement.PeriodStart || postingDate > secondStatement.PeriodEnd {
+		return nil, "", appErr(ErrValidation, "transfer posting date must fall within both statement periods")
+	}
+	nextTransferVersion := first.TransferVersion
+	if second.TransferVersion > nextTransferVersion {
+		nextTransferVersion = second.TransferVersion
+	}
+	nextTransferVersion++
+	pairID := ids[0] + ":" + ids[1] + ":" + int64String(int64(nextTransferVersion))
 	entry, root, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
-		Date:               laterDate(first.Date, second.Date),
+		Date:               postingDate,
 		Memo:               "Bank transfer " + from.ID + " to " + to.ID,
 		Workflow:           "bank.transfer.pair",
 		PostingSemantics:   "book_account_transfer",
 		SourceDocumentType: "bank_transfer",
-		SourceDocumentID:   ids[0] + ":" + ids[1],
+		SourceDocumentID:   pairID,
 		Source:             "bank_transfer",
-		SourceKey:          ids[0] + ":" + ids[1],
+		SourceKey:          pairID,
 		Postings:           []Posting{fromPosting, toPosting},
 		Metadata: map[string]string{
 			"from_transaction_id": from.ID,
@@ -373,15 +457,121 @@ func (s *Store) PairBankTransfer(ctx Context, firstID, secondID string) ([]BankT
 	}
 	first.Status = BankTransactionPaired
 	first.TransferTransactionID = second.ID
-	first.JournalEntryIDs = []string{entry.ID}
+	first.TransferVersion = nextTransferVersion
+	first.TransferDirection = transferDirection(first.ID, from.ID)
+	first.JournalEntryIDs = appendUniqueString(first.JournalEntryIDs, entry.ID)
+	first.ActiveJournalEntryIDs = []string{entry.ID}
+	first.TransferHistory = append(first.TransferHistory, BankTransferHistory{
+		PairID: pairID, OtherTransactionID: second.ID, EconomicDirection: first.TransferDirection,
+		JournalEntryID: entry.ID, CreatedAt: s.now().UTC(), CreatedBy: ctx.Actor,
+	})
 	first.UpdatedAt = s.now().UTC()
 	first.UpdatedBy = ctx.Actor
 	second.Status = BankTransactionPaired
 	second.TransferTransactionID = first.ID
-	second.JournalEntryIDs = []string{entry.ID}
+	second.TransferVersion = nextTransferVersion
+	second.TransferDirection = transferDirection(second.ID, from.ID)
+	second.JournalEntryIDs = appendUniqueString(second.JournalEntryIDs, entry.ID)
+	second.ActiveJournalEntryIDs = []string{entry.ID}
+	second.TransferHistory = append(second.TransferHistory, BankTransferHistory{
+		PairID: pairID, OtherTransactionID: first.ID, EconomicDirection: second.TransferDirection,
+		JournalEntryID: entry.ID, CreatedAt: s.now().UTC(), CreatedBy: ctx.Actor,
+	})
 	second.UpdatedAt = s.now().UTC()
 	second.UpdatedBy = ctx.Actor
 	root, err = s.appendEventAt(ctx, "bank.transaction", ids[0]+":"+ids[1], "bank transfer pair", wrapEvent("bank.transfer.pair", bankTransferPairPayload{From: first, To: second}), root)
+	return []BankTransaction{first, second}, root, err
+}
+
+func (s *Store) ReverseBankTransfer(ctx Context, firstID, secondID, reason, date string) ([]BankTransaction, string, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return nil, "", err
+	}
+	if err := EnsurePermission(st, ctx, PermissionLedgerWrite); err != nil {
+		return nil, "", err
+	}
+	first, err := bankTransactionForWrite(st, firstID)
+	if err != nil {
+		return nil, "", err
+	}
+	second, err := bankTransactionForWrite(st, secondID)
+	if err != nil {
+		return nil, "", err
+	}
+	if first.ID == second.ID {
+		return nil, "", appErr(ErrValidation, "a bank transfer requires two different transactions")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return nil, "", appErr(ErrValidation, "bank transfer reversal reason is required")
+	}
+	firstHistory, firstIndex, firstOK := currentTransferHistory(first, second.ID)
+	secondHistory, secondIndex, secondOK := currentTransferHistory(second, first.ID)
+	if !firstOK || !secondOK || firstHistory.PairID != secondHistory.PairID || firstHistory.JournalEntryID != secondHistory.JournalEntryID {
+		return nil, "", appErr(ErrConflict, "transactions do not share the same auditable transfer pair")
+	}
+	original, ok := st.JournalEntries[firstHistory.JournalEntryID]
+	if !ok {
+		return nil, "", appErr(ErrValidation, "bank transfer journal entry %s not found", firstHistory.JournalEntryID)
+	}
+	date, err = normalizeBankDate(date, original.Date, "transfer reversal date")
+	if err != nil {
+		return nil, "", err
+	}
+	if date != original.Date {
+		return nil, "", appErr(ErrValidation, "bank transfer reversal date must equal the original transfer journal date %s", original.Date)
+	}
+	if first.Status == BankTransactionStaged && second.Status == BankTransactionStaged &&
+		firstHistory.ReversalJournalEntryID != "" && secondHistory.ReversalJournalEntryID == firstHistory.ReversalJournalEntryID {
+		if firstHistory.ReversalReason == reason && firstHistory.ReversalDate == date {
+			return []BankTransaction{first, second}, st.Root, nil
+		}
+		return nil, "", appErr(ErrConflict, "bank transfer was already reversed with different audit details")
+	}
+	if first.Status != BankTransactionPaired || second.Status != BankTransactionPaired ||
+		first.TransferTransactionID != second.ID || second.TransferTransactionID != first.ID {
+		return nil, "", appErr(ErrConflict, "both transactions must be the currently paired transfer legs")
+	}
+	entry, root, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
+		Date:               date,
+		Memo:               "Bank transfer reversed " + firstHistory.PairID + ": " + reason,
+		Workflow:           "bank.transfer.reverse",
+		PostingSemantics:   "book_account_transfer_reversed",
+		SourceDocumentType: "bank_transfer",
+		SourceDocumentID:   firstHistory.PairID,
+		Source:             "bank_transfer",
+		SourceKey:          firstHistory.PairID + ":reverse",
+		Postings:           reversePostings(original.Postings),
+		Metadata: map[string]string{
+			"original_journal_entry_id": original.ID,
+			"reason":                    reason,
+			"economic_from_transaction": economicTransferLeg(first, second, "from"),
+			"economic_to_transaction":   economicTransferLeg(first, second, "to"),
+		},
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	now := s.now().UTC()
+	first.TransferHistory[firstIndex].ReversalJournalEntryID = entry.ID
+	first.TransferHistory[firstIndex].ReversalReason = reason
+	first.TransferHistory[firstIndex].ReversalDate = date
+	second.TransferHistory[secondIndex].ReversalJournalEntryID = entry.ID
+	second.TransferHistory[secondIndex].ReversalReason = reason
+	second.TransferHistory[secondIndex].ReversalDate = date
+	for _, transaction := range []*BankTransaction{&first, &second} {
+		transaction.Status = BankTransactionStaged
+		transaction.JournalEntryIDs = appendUniqueString(transaction.JournalEntryIDs, entry.ID)
+		transaction.ActiveJournalEntryIDs = nil
+		transaction.TransferTransactionID = ""
+		transaction.TransferDirection = ""
+		transaction.UpdatedAt = now
+		transaction.UpdatedBy = ctx.Actor
+	}
+	ids := []string{first.ID, second.ID}
+	sort.Strings(ids)
+	root, err = s.appendEventAt(ctx, "bank.transaction", ids[0]+":"+ids[1], "bank transfer reverse", wrapEvent("bank.transfer.reverse", bankTransferPairPayload{From: first, To: second}), root)
 	return []BankTransaction{first, second}, root, err
 }
 
@@ -622,12 +812,12 @@ func buildReconciliationReport(st State, statementID string) (ReconciliationRepo
 		if err != nil {
 			return ReconciliationReport{}, err
 		}
-		if transaction.Status == BankTransactionStaged || transaction.Status == BankTransactionReversed {
-			reason := "transaction is not posted or paired"
-			if transaction.Status == BankTransactionReversed {
-				reason = "transaction posting was reversed"
-			}
-			report.UnmatchedItems = append(report.UnmatchedItems, reconciliationTransactionItem(transaction, reason))
+		switch transaction.Status {
+		case BankTransactionStaged:
+			report.UnmatchedItems = append(report.UnmatchedItems, reconciliationTransactionItem(transaction, "transaction is not posted or paired"))
+		case BankTransactionPosted, BankTransactionPaired:
+		default:
+			report.UnmatchedItems = append(report.UnmatchedItems, reconciliationTransactionItem(transaction, "transaction has invalid workflow status"))
 		}
 		for _, journalID := range transaction.JournalEntryIDs {
 			matchedJournalIDs[journalID] = true
@@ -710,6 +900,69 @@ func normalBalancePostingEffect(account Account, posting Posting) (int64, error)
 		return checkedSubtractCents(posting.Credit, posting.Debit, "liability posting effect")
 	}
 	return 0, appErr(ErrValidation, "statement account %s has invalid account type %s", account.ID, account.Type)
+}
+
+func accountBalanceBefore(st State, account Account, beforeDate string) (int64, bool, error) {
+	var balance int64
+	hasActivity := false
+	for _, entry := range st.JournalEntries {
+		for _, posting := range entry.Postings {
+			if posting.AccountID != account.ID {
+				continue
+			}
+			hasActivity = true
+			if entry.Date >= beforeDate {
+				continue
+			}
+			effect, err := normalBalancePostingEffect(account, posting)
+			if err != nil {
+				return 0, false, err
+			}
+			balance, err = checkedAddCents(balance, effect, "opening ledger balance")
+			if err != nil {
+				return 0, false, err
+			}
+		}
+	}
+	return balance, hasActivity, nil
+}
+
+func openingBalancePostings(account Account, equityAccountID string, balance int64) ([]Posting, error) {
+	amount, err := absoluteCents(balance)
+	if err != nil {
+		return nil, err
+	}
+	if amount == 0 {
+		return nil, nil
+	}
+	statementPosting, err := bankAccountPosting(account, balance)
+	if err != nil {
+		return nil, err
+	}
+	equityPosting := Posting{AccountID: equityAccountID, Memo: "Opening balance equity"}
+	if statementPosting.Debit > 0 {
+		equityPosting.Credit = amount
+	} else {
+		equityPosting.Debit = amount
+	}
+	return []Posting{statementPosting, equityPosting}, nil
+}
+
+func hasStatementForAccount(st State, accountID string) bool {
+	for _, statement := range st.BankStatements {
+		if statement.AccountID == accountID {
+			return true
+		}
+	}
+	return false
+}
+
+func dayBefore(date string) (string, error) {
+	parsed, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return "", appErr(ErrValidation, "date must use YYYY-MM-DD")
+	}
+	return parsed.AddDate(0, 0, -1).Format("2006-01-02"), nil
 }
 
 func normalizeBankExternalRefs(refs []ExternalSourceRef) ([]ExternalSourceRef, error) {
@@ -816,6 +1069,42 @@ func laterDate(first, second string) string {
 		return first
 	}
 	return second
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func transferDirection(transactionID, fromID string) string {
+	if transactionID == fromID {
+		return "from"
+	}
+	return "to"
+}
+
+func currentTransferHistory(transaction BankTransaction, otherID string) (BankTransferHistory, int, bool) {
+	for i := len(transaction.TransferHistory) - 1; i >= 0; i-- {
+		history := transaction.TransferHistory[i]
+		if history.OtherTransactionID == otherID {
+			return history, i, true
+		}
+	}
+	return BankTransferHistory{}, -1, false
+}
+
+func economicTransferLeg(first, second BankTransaction, direction string) string {
+	if first.TransferDirection == direction {
+		return first.ID
+	}
+	if second.TransferDirection == direction {
+		return second.ID
+	}
+	return ""
 }
 
 func reconciliationTransactionItem(transaction BankTransaction, reason string) ReconciliationItem {

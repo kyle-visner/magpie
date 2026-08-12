@@ -202,10 +202,9 @@ type Payout struct {
 type BankTransactionStatus string
 
 const (
-	BankTransactionStaged   BankTransactionStatus = "staged"
-	BankTransactionPosted   BankTransactionStatus = "posted"
-	BankTransactionPaired   BankTransactionStatus = "paired"
-	BankTransactionReversed BankTransactionStatus = "reversed"
+	BankTransactionStaged BankTransactionStatus = "staged"
+	BankTransactionPosted BankTransactionStatus = "posted"
+	BankTransactionPaired BankTransactionStatus = "paired"
 )
 
 type ReconciliationStatus string
@@ -224,20 +223,21 @@ type SourceDocumentReference struct {
 }
 
 type BankStatement struct {
-	ID                  string                   `json:"id"`
-	AccountID           string                   `json:"account_id"`
-	PeriodStart         string                   `json:"period_start"`
-	PeriodEnd           string                   `json:"period_end"`
-	OpeningBalanceCents int64                    `json:"opening_balance_cents"`
-	ClosingBalanceCents int64                    `json:"closing_balance_cents"`
-	Currency            string                   `json:"currency"`
-	ExternalRefs        []ExternalSourceRef      `json:"external_refs"`
-	SourceDocument      *SourceDocumentReference `json:"source_document,omitempty"`
-	Status              ReconciliationStatus     `json:"status"`
-	CompletedAt         time.Time                `json:"completed_at,omitempty"`
-	CompletedBy         string                   `json:"completed_by,omitempty"`
-	CreatedAt           time.Time                `json:"created_at"`
-	CreatedBy           string                   `json:"created_by"`
+	ID                    string                   `json:"id"`
+	AccountID             string                   `json:"account_id"`
+	PeriodStart           string                   `json:"period_start"`
+	PeriodEnd             string                   `json:"period_end"`
+	OpeningBalanceCents   int64                    `json:"opening_balance_cents"`
+	ClosingBalanceCents   int64                    `json:"closing_balance_cents"`
+	Currency              string                   `json:"currency"`
+	ExternalRefs          []ExternalSourceRef      `json:"external_refs"`
+	SourceDocument        *SourceDocumentReference `json:"source_document,omitempty"`
+	OpeningJournalEntryID string                   `json:"opening_journal_entry_id,omitempty"`
+	Status                ReconciliationStatus     `json:"status"`
+	CompletedAt           time.Time                `json:"completed_at,omitempty"`
+	CompletedBy           string                   `json:"completed_by,omitempty"`
+	CreatedAt             time.Time                `json:"created_at"`
+	CreatedBy             string                   `json:"created_by"`
 }
 
 type BankReclassification struct {
@@ -249,29 +249,56 @@ type BankReclassification struct {
 	CreatedBy     string    `json:"created_by"`
 }
 
+type BankTransactionReversal struct {
+	Reason                  string    `json:"reason"`
+	Date                    string    `json:"date"`
+	OriginalJournalEntryIDs []string  `json:"original_journal_entry_ids"`
+	ReversalJournalEntryIDs []string  `json:"reversal_journal_entry_ids"`
+	CreatedAt               time.Time `json:"created_at"`
+	CreatedBy               string    `json:"created_by"`
+}
+
+type BankTransferHistory struct {
+	PairID                 string    `json:"pair_id"`
+	OtherTransactionID     string    `json:"other_transaction_id"`
+	EconomicDirection      string    `json:"economic_direction"`
+	JournalEntryID         string    `json:"journal_entry_id"`
+	ReversalJournalEntryID string    `json:"reversal_journal_entry_id,omitempty"`
+	ReversalReason         string    `json:"reversal_reason,omitempty"`
+	ReversalDate           string    `json:"reversal_date,omitempty"`
+	CreatedAt              time.Time `json:"created_at"`
+	CreatedBy              string    `json:"created_by"`
+}
+
 // AmountCents is the signed change to the statement balance. Positive amounts
 // increase the balance and negative amounts decrease it. For liability
 // accounts (for example, credit cards), an increase is a credit.
 type BankTransaction struct {
-	ID                    string                   `json:"id"`
-	StatementID           string                   `json:"statement_id"`
-	AccountID             string                   `json:"account_id"`
-	Date                  string                   `json:"date"`
-	AmountCents           int64                    `json:"amount_cents"`
-	Currency              string                   `json:"currency"`
-	Pending               bool                     `json:"pending,omitempty"`
-	ExternalRefs          []ExternalSourceRef      `json:"external_refs"`
-	SourceDocument        *SourceDocumentReference `json:"source_document,omitempty"`
-	Status                BankTransactionStatus    `json:"status"`
-	ClassificationAccount string                   `json:"classification_account_id,omitempty"`
-	JournalEntryIDs       []string                 `json:"journal_entry_ids,omitempty"`
-	TransferTransactionID string                   `json:"transfer_transaction_id,omitempty"`
-	ReversalReason        string                   `json:"reversal_reason,omitempty"`
-	Reclassifications     []BankReclassification   `json:"reclassifications,omitempty"`
-	CreatedAt             time.Time                `json:"created_at"`
-	UpdatedAt             time.Time                `json:"updated_at"`
-	CreatedBy             string                   `json:"created_by"`
-	UpdatedBy             string                   `json:"updated_by"`
+	ID                    string                    `json:"id"`
+	StatementID           string                    `json:"statement_id"`
+	AccountID             string                    `json:"account_id"`
+	Date                  string                    `json:"date"`
+	AmountCents           int64                     `json:"amount_cents"`
+	Currency              string                    `json:"currency"`
+	Pending               bool                      `json:"pending,omitempty"`
+	ExternalRefs          []ExternalSourceRef       `json:"external_refs"`
+	SourceDocument        *SourceDocumentReference  `json:"source_document,omitempty"`
+	Status                BankTransactionStatus     `json:"status"`
+	ClassificationAccount string                    `json:"classification_account_id,omitempty"`
+	JournalEntryIDs       []string                  `json:"journal_entry_ids,omitempty"`
+	ActiveJournalEntryIDs []string                  `json:"active_journal_entry_ids,omitempty"`
+	PostingVersion        int                       `json:"posting_version,omitempty"`
+	TransferTransactionID string                    `json:"transfer_transaction_id,omitempty"`
+	TransferDirection     string                    `json:"transfer_direction,omitempty"`
+	TransferVersion       int                       `json:"transfer_version,omitempty"`
+	ReversalReason        string                    `json:"reversal_reason,omitempty"`
+	Reclassifications     []BankReclassification    `json:"reclassifications,omitempty"`
+	Reversals             []BankTransactionReversal `json:"reversals,omitempty"`
+	TransferHistory       []BankTransferHistory     `json:"transfer_history,omitempty"`
+	CreatedAt             time.Time                 `json:"created_at"`
+	UpdatedAt             time.Time                 `json:"updated_at"`
+	CreatedBy             string                    `json:"created_by"`
+	UpdatedBy             string                    `json:"updated_by"`
 }
 
 type ReconciliationItem struct {

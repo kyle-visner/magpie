@@ -207,6 +207,10 @@ workflow journals idempotently from external references.
 
 `bank statement import-json` creates an open statement for an
 `operating_cash`, `bank_account`, or liability `credit_card` account.
+For the first statement on an unused account, a nonzero opening balance creates
+a workflow journal against the configured `opening_balance_equity` role, dated
+one day before the statement period. This uses `ledger:write`, not
+`journal:adjust`. Existing account activity is never silently adjusted.
 `bank transaction import-json` stages a row by stable external reference.
 `amount_cents` is the signed statement-balance change; positive increases the
 balance and negative decreases it. A pending transaction cannot be posted or
@@ -223,7 +227,14 @@ and different accounts, and produces one journal with no income or expense.
 Use `bank transaction reclassify` or `bank transaction reverse` for audited
 corrections. Both append workflow journals and preserve earlier events.
 Reversal offsets every journal contributing to the transaction's current
-classification exactly.
+classification exactly and returns the row to `staged` for a corrected repost.
+Its date defaults to and must equal the source transaction date. Repeating the
+last exact correction is idempotent; an older historical target/reason is not a
+no-op after later classification changes.
+
+Use `bank transfer reverse` to offset an incorrect pair. Both legs return to
+`staged`, while pair history retains the economic `from`/`to` direction and
+audit reason. The reversal date must equal the original pair journal date.
 
 Run `bank reconciliation preview` after all source rows are imported. Completion
 requires zero ledger difference, zero opening-plus-activity difference, and no
@@ -295,6 +306,7 @@ bank transaction reverse --transaction-id ID --reason REASON [--date YYYY-MM-DD]
 bank transaction reclassify --transaction-id ID --account-id ID --reason REASON
 bank transaction list
 bank transfer pair --from-transaction-id ID --to-transaction-id ID
+bank transfer reverse --from-transaction-id ID --to-transaction-id ID --reason REASON [--date YYYY-MM-DD]
 bank reconciliation preview --statement-id ID
 bank reconciliation complete --statement-id ID
 rbac defaults repair

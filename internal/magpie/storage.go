@@ -424,7 +424,7 @@ func (s *Store) applyNodeWithMetadata(st *State, node Node) (bool, error) {
 			return false, appErr(ErrValidation, "bank.transaction.update references unknown transaction %s", ev.Transaction.ID)
 		}
 		st.BankTransactions[ev.Transaction.ID] = ev.Transaction
-	case "bank.transfer.pair":
+	case "bank.transfer.pair", "bank.transfer.reverse":
 		var ev bankTransferPairPayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {
 			return false, err

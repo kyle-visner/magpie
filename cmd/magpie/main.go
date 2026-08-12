@@ -186,7 +186,7 @@ func (a app) bankTransaction(args []string, out io.Writer) error {
 	case "reverse":
 		fs := newFlagSet("bank transaction reverse")
 		transactionID := fs.String("transaction-id", "", "Magpie bank transaction id")
-		date := fs.String("date", "", "reversal date YYYY-MM-DD; defaults to today")
+		date := fs.String("date", "", "reversal date; defaults to and must equal the source transaction date")
 		reason := fs.String("reason", "", "audited reversal reason")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -224,16 +224,28 @@ func (a app) bankTransaction(args []string, out io.Writer) error {
 }
 
 func (a app) bankTransfer(args []string, out io.Writer) error {
-	if len(args) == 0 || args[0] != "pair" {
-		return fmt.Errorf("usage: bank transfer pair --from-transaction-id ID --to-transaction-id ID")
+	if len(args) == 0 {
+		return fmt.Errorf("bank transfer command required")
 	}
-	fs := newFlagSet("bank transfer pair")
+	fs := newFlagSet("bank transfer " + args[0])
 	fromID := fs.String("from-transaction-id", "", "outgoing transaction id")
 	toID := fs.String("to-transaction-id", "", "incoming transaction id")
+	reason := fs.String("reason", "", "audited transfer reversal reason")
+	date := fs.String("date", "", "reversal date; defaults to the original transfer journal date")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	transactions, root, err := a.store.PairBankTransfer(a.ctx, *fromID, *toID)
+	var transactions []magpie.BankTransaction
+	var root string
+	var err error
+	switch args[0] {
+	case "pair":
+		transactions, root, err = a.store.PairBankTransfer(a.ctx, *fromID, *toID)
+	case "reverse":
+		transactions, root, err = a.store.ReverseBankTransfer(a.ctx, *fromID, *toID, *reason, *date)
+	default:
+		return fmt.Errorf("unknown bank transfer command %q", args[0])
+	}
 	if err != nil {
 		return err
 	}
@@ -857,6 +869,7 @@ Commands:
   bank transaction reclassify --transaction-id ID --account-id ID --reason REASON
   bank transaction list
   bank transfer pair --from-transaction-id ID --to-transaction-id ID
+  bank transfer reverse --from-transaction-id ID --to-transaction-id ID --reason REASON [--date YYYY-MM-DD]
   bank reconciliation preview --statement-id ID
   bank reconciliation complete --statement-id ID
   rbac defaults repair
