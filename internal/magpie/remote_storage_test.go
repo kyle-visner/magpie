@@ -27,6 +27,8 @@ type hostedJaybaseStub struct {
 	refPUTs       int
 	expectedRoots []string
 	advanceReplay bool
+	payloadReads  [][]string
+	compatReads   int
 }
 
 func newHostedJaybaseStub() *hostedJaybaseStub {
@@ -69,6 +71,8 @@ func (s *hostedJaybaseStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeStubJSON(w, http.StatusOK, map[string]string{"root": root})
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/events":
 		s.eventsResponse(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/events/payloads":
+		s.payloadsResponse(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/events":
 		s.appendResponse(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/refs/"):
@@ -154,6 +158,26 @@ func (s *hostedJaybaseStub) appendResponse(w http.ResponseWriter, r *http.Reques
 func (s *hostedJaybaseStub) eventsResponse(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if r.URL.Query().Get("include_payload") == "true" {
+		s.compatReads++
+	}
+	targetRoot := r.URL.Query().Get("root")
+	bound := len(s.events)
+	if targetRoot == "" {
+		targetRoot = s.root
+	} else {
+		bound = 0
+		for i, event := range s.events {
+			if event.Hash == targetRoot {
+				bound = i + 1
+				break
+			}
+		}
+		if bound == 0 {
+			writeStubJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "conflict", "message": "root is not in history"}})
+			return
+		}
+	}
 	start := 0
 	if after := r.URL.Query().Get("after"); after != "" {
 		for i, event := range s.events {
@@ -164,22 +188,61 @@ func (s *hostedJaybaseStub) eventsResponse(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	end := start + 1 // Force pagination so the client cursor path is exercised.
-	if end > len(s.events) {
-		end = len(s.events)
+	if end > bound {
+		end = bound
 	}
 	events := append([]jaybase.Node(nil), s.events[start:end]...)
-	if r.URL.Query().Get("include_payload") != "true" {
-		for i := range events {
-			events[i].Payload = nil
-		}
+	for i := range events {
+		events[i].Payload = nil
 	}
 	writeStubJSON(w, http.StatusOK, map[string]any{
-		"events": events, "root": s.root, "has_more": end < len(s.events),
+		"events": events, "root": targetRoot, "has_more": end < bound,
 	})
 	if s.advanceReplay {
 		s.root = fmt.Sprintf("sha256:%064x", len(s.events)+1000)
 		s.advanceReplay = false
 	}
+}
+
+func (s *hostedJaybaseStub) payloadsResponse(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Root     string   `json:"root"`
+		EventIDs []string `json:"event_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeStubJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "validation_error", "message": err.Error()}})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rootIndex := -1
+	for i, event := range s.events {
+		if event.Hash == request.Root {
+			rootIndex = i
+			break
+		}
+	}
+	if rootIndex < 0 {
+		writeStubJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "conflict", "message": "root is not in history"}})
+		return
+	}
+	payloads := make([]remoteEventPayload, 0, len(request.EventIDs))
+	for _, eventID := range request.EventIDs {
+		found := false
+		for _, event := range s.events[:rootIndex+1] {
+			if event.Hash == eventID {
+				payloads = append(payloads, remoteEventPayload{EventID: eventID, Hash: eventID, Payload: event.Payload})
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeStubJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "event not found"}})
+			return
+		}
+	}
+	s.payloadReads = append(s.payloadReads, append([]string(nil), request.EventIDs...))
+	writeStubJSON(w, http.StatusOK, remotePayloadBatch{Root: request.Root, Payloads: payloads})
 }
 
 func writeStubJSON(w http.ResponseWriter, status int, value any) {
@@ -269,6 +332,9 @@ func TestRemoteStoreUsesHostedJaybaseContract(t *testing.T) {
 	if stub.namedRefs["before-close"] != updatedRoot {
 		t.Fatalf("named ref was not written through the hosted API: %#v", stub.namedRefs)
 	}
+	if stub.compatReads != 0 || len(stub.payloadReads) == 0 {
+		t.Fatalf("remote replay did not use metadata-first selective payload reads: compatibility=%d selective=%d", stub.compatReads, len(stub.payloadReads))
+	}
 }
 
 func TestRemoteStoreInterleavesForeignEventsAndAppendsAtSharedRoot(t *testing.T) {
@@ -306,6 +372,80 @@ func TestRemoteStoreInterleavesForeignEventsAndAppendsAtSharedRoot(t *testing.T)
 	}
 	if len(stub.events) != 3 || stub.events[2].Parents[0] != foreignRoot {
 		t.Fatalf("unexpected hosted event chain: %#v", stub.events)
+	}
+	if stub.compatReads != 0 || len(stub.payloadReads) == 0 {
+		t.Fatalf("shared replay did not use metadata-first payload selection: compatibility=%d selective=%d", stub.compatReads, len(stub.payloadReads))
+	}
+	for _, selection := range stub.payloadReads {
+		for _, eventID := range selection {
+			if eventID == foreignRoot {
+				t.Fatalf("foreign event %s was selected for payload decryption: %#v", foreignRoot, stub.payloadReads)
+			}
+		}
+	}
+}
+
+func TestRemoteReplayRejectsMalformedPagination(t *testing.T) {
+	const (
+		firstHash  = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		secondHash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	tests := []struct {
+		name  string
+		pages []remoteEventPage
+		want  string
+	}{
+		{
+			name: "empty cursor",
+			pages: []remoteEventPage{{
+				Root: firstHash, Events: []jaybase.Node{{Type: "martin.contact"}}, HasMore: true,
+			}},
+			want: "without an advancing event cursor",
+		},
+		{
+			name: "repeated cursor",
+			pages: []remoteEventPage{
+				{Root: secondHash, Events: []jaybase.Node{{Hash: firstHash, Type: "martin.contact"}}, HasMore: true},
+				{Root: secondHash, Events: []jaybase.Node{{Hash: firstHash, Type: "martin.contact"}}, HasMore: true},
+			},
+			want: "without an advancing event cursor",
+		},
+		{
+			name: "changed empty root",
+			pages: []remoteEventPage{
+				{Root: "", Events: []jaybase.Node{{Hash: firstHash, Type: "martin.contact"}}, HasMore: true},
+				{Root: secondHash, Events: []jaybase.Node{{Hash: secondHash, Type: "martin.contact"}}, HasMore: false},
+			},
+			want: "replay root changed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/events" {
+					writeStubJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "not found"}})
+					return
+				}
+				if calls >= len(test.pages) {
+					writeStubJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "internal", "message": "unexpected extra page request"}})
+					return
+				}
+				page := test.pages[calls]
+				calls++
+				writeStubJSON(w, http.StatusOK, page)
+			}))
+			defer server.Close()
+
+			store, err := openRemoteStore(server.URL, "writer-token", server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if _, err := store.AuditLog(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("AuditLog error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -404,11 +544,13 @@ func TestRemoteInitialRootReconcilesConcurrentWinner(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/events" && initialized.Load():
 			writeStubJSON(w, http.StatusOK, map[string]any{
 				"events": []jaybase.Node{{
-					Schema: 1, Hash: winner, Type: "store.init", Payload: initPayload,
+					Schema: 1, Hash: winner, Type: "store.init",
 					Actor: "owner", Command: "store init", CreatedAt: time.Now().UTC(),
 				}},
 				"root": winner, "has_more": false,
 			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/events/payloads" && initialized.Load():
+			writeStubJSON(w, http.StatusOK, remotePayloadBatch{Root: winner, Payloads: []remoteEventPayload{{EventID: winner, Hash: winner, Payload: initPayload}}})
 		default:
 			writeStubJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "not found"}})
 		}

@@ -73,8 +73,11 @@ Rules for hosted mode:
   transcript, or idempotency key.
 - Do not combine an explicit `--store` with `JAYBASE_URL` or `--jaybase-url`.
 - Use the lowest Jaybase credential role that can complete the task.
-- Hosted commands currently reconstruct Magpie state by replaying the complete
-  event history. Expect latency and bandwidth to grow with history size.
+- Hosted commands scan the complete event metadata chain, bounded to one
+  captured root, and retrieve decrypted payloads only for Magpie-owned events
+  through Jaybase's selective payload endpoint. Accepted foreign namespaces
+  advance the shared root without fetching their payloads. Metadata scanning
+  and selected-payload retrieval still grow with history size.
 
 Magpie's `--actor` is a domain identity, not proof of authentication. Jaybase
 authenticates the bearer token but does not prove that it belongs to the actor

@@ -78,7 +78,7 @@ AGPL-3.0-or-later. See `LICENSE`.
 
 - Canonical CLI in `cmd/magpie` with local embedded and hosted Jaybase backends.
 - Append-only, SHA-256-addressed event history through Jaybase.
-- Bearer-authenticated hosted Jaybase access over HTTPS with paginated replay, optimistic concurrency, idempotent writes, and remote named refs.
+- Bearer-authenticated hosted Jaybase access over HTTPS with bounded metadata-first replay, selective payload retrieval, optimistic concurrency, idempotent writes, and remote named refs.
 - AES-256-GCM encryption for stored node payloads.
 - Unified RBAC for ledger, notes, snapshots, and audit reads.
 - Double-entry ledger validation before persistence.
@@ -170,10 +170,11 @@ export JAYBASE_TOKEN='writer-token-from-the-secret-manager'
 ```
 
 `--jaybase-url` may override the origin, but the token is accepted only through
-`JAYBASE_TOKEN`. Hosted requests fetch decrypted payloads only when replaying
-state; audit output remains metadata-only. Writes use Jaybase's `expected_root`
-and `Idempotency-Key` contract and return a conflict instead of overwriting a
-newer root.
+`JAYBASE_TOKEN`. Hosted state replay first reads metadata pages bounded to one
+captured root, then requests decrypted payloads only for Magpie-owned events;
+accepted `martin.*` payloads are not fetched. Audit output remains metadata-only.
+Writes use Jaybase's `expected_root` and `Idempotency-Key` contract and return a
+conflict instead of overwriting a newer root.
 
 Magpie can share one linear Jaybase history with Martin. Replay applies the
 legacy Magpie node types, skips `martin.*` nodes while still advancing to their
@@ -1142,18 +1143,19 @@ read or mount the server's data volume, refs, or encryption key. Jaybase owns
 transport authentication, concurrent append serialization, encryption at rest,
 and hosted snapshots/backups.
 
-Each hosted command currently reconstructs state by fetching and decrypting the
-complete event history. This keeps local and hosted behavior identical, but its
-latency, bandwidth, and server work grow linearly with history size. Large or
-high-frequency ledgers will need incremental state caching, compaction, or a
-server-side materialized-state endpoint before this backend scales efficiently.
-Hosted replay currently requests payloads for the complete event page, so
-Jaybase decrypts foreign payloads before Magpie can classify them. A corrupt or
-key-mismatched foreign payload therefore fails the entire hosted replay page
-closed and can prevent Magpie state loading or initialization. Metadata-first
-replay with selective payload fetch for Magpie-owned types remains required to
-remove that availability coupling. Local replay classifies `martin.*` nodes
-from metadata and does not decrypt their payloads.
+Each hosted command currently reconstructs state by scanning the complete event
+metadata chain, with every page bounded to the root captured at the start of
+replay. Magpie classifies those records from metadata and retrieves decrypted
+payloads in selective batches only for Magpie-owned event types. Accepted
+`martin.*` events still advance the shared root, but their payloads are not
+fetched, so a corrupt or key-mismatched foreign payload does not prevent Magpie
+state replay. Unknown event types, missing selected payloads, and integrity
+errors in selected Magpie payloads still fail closed.
+
+Metadata scanning and Magpie payload retrieval still grow linearly with history
+size. Large or high-frequency ledgers will need incremental state caching,
+compaction, or a server-side materialized-state endpoint before this backend
+scales efficiently.
 
 In local mode, the default store directory is `.magpie/`:
 
