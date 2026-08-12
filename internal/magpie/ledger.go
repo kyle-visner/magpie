@@ -349,6 +349,8 @@ func accountRoleTypes() map[AccountRole]AccountType {
 	return map[AccountRole]AccountType{
 		AccountRoleOperatingCash:           AccountAsset,
 		AccountRoleBankAccount:             AccountAsset,
+		AccountRoleTransferClearing:        AccountAsset,
+		AccountRoleCreditCard:              AccountLiability,
 		AccountRoleAccountsReceivable:      AccountAsset,
 		AccountRoleUndepositedFunds:        AccountAsset,
 		AccountRoleInventory:               AccountAsset,
@@ -376,6 +378,7 @@ func accountRoleTypes() map[AccountRole]AccountType {
 func uniqueAccountRoles() map[AccountRole]bool {
 	return map[AccountRole]bool{
 		AccountRoleOperatingCash:         true,
+		AccountRoleTransferClearing:      true,
 		AccountRoleAccountsReceivable:    true,
 		AccountRoleAccountsPayable:       true,
 		AccountRoleSalesTaxPayable:       true,

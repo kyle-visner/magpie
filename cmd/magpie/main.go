@@ -100,6 +100,8 @@ func run(args []string, out io.Writer) error {
 		return a.invoice(rest[1:], out)
 	case "payout":
 		return a.payout(rest[1:], out)
+	case "bank":
+		return a.bank(rest[1:], out)
 	case "ledger":
 		return a.ledger(rest[1:], out)
 	case "note":
@@ -108,6 +110,172 @@ func run(args []string, out io.Writer) error {
 		return a.snapshot(rest[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q", rest[0])
+	}
+}
+
+func (a app) bank(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("bank command required")
+	}
+	switch args[0] {
+	case "statement":
+		return a.bankStatement(args[1:], out)
+	case "transaction":
+		return a.bankTransaction(args[1:], out)
+	case "transfer":
+		return a.bankTransfer(args[1:], out)
+	case "reconciliation":
+		return a.bankReconciliation(args[1:], out)
+	default:
+		return fmt.Errorf("unknown bank command %q", args[0])
+	}
+}
+
+func (a app) bankStatement(args []string, out io.Writer) error {
+	if len(args) == 0 || args[0] != "import-json" {
+		return fmt.Errorf("usage: bank statement import-json --file statement.json")
+	}
+	fs := newFlagSet("bank statement import-json")
+	file := fs.String("file", "", "canonical bank/card statement JSON; '-' reads stdin")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	var statement magpie.BankStatement
+	if err := readJSONFile(*file, &statement); err != nil {
+		return err
+	}
+	imported, root, err := a.store.ImportBankStatement(a.ctx, statement)
+	if err != nil {
+		return err
+	}
+	return writeJSON(out, map[string]any{"root": root, "statement": imported})
+}
+
+func (a app) bankTransaction(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("bank transaction command required")
+	}
+	switch args[0] {
+	case "import-json":
+		fs := newFlagSet("bank transaction import-json")
+		file := fs.String("file", "", "canonical bank/card transaction JSON; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var transaction magpie.BankTransaction
+		if err := readJSONFile(*file, &transaction); err != nil {
+			return err
+		}
+		imported, root, err := a.store.ImportBankTransaction(a.ctx, transaction)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "transaction": imported})
+	case "post":
+		fs := newFlagSet("bank transaction post")
+		transactionID := fs.String("transaction-id", "", "Magpie bank transaction id")
+		accountID := fs.String("account-id", "", "classification account id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		transaction, root, err := a.store.PostBankTransaction(a.ctx, *transactionID, *accountID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "transaction": transaction})
+	case "reverse":
+		fs := newFlagSet("bank transaction reverse")
+		transactionID := fs.String("transaction-id", "", "Magpie bank transaction id")
+		date := fs.String("date", "", "reversal date; defaults to and must equal the source transaction date")
+		reason := fs.String("reason", "", "audited reversal reason")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		transaction, root, err := a.store.ReverseBankTransaction(a.ctx, *transactionID, *reason, *date)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "transaction": transaction})
+	case "reclassify":
+		fs := newFlagSet("bank transaction reclassify")
+		transactionID := fs.String("transaction-id", "", "Magpie bank transaction id")
+		accountID := fs.String("account-id", "", "new classification account id")
+		reason := fs.String("reason", "", "audited reclassification reason")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		transaction, root, err := a.store.ReclassifyBankTransaction(a.ctx, *transactionID, *accountID, *reason)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "transaction": transaction})
+	case "list":
+		st, err := a.store.LoadState()
+		if err != nil {
+			return err
+		}
+		if err := magpie.EnsurePermission(st, a.ctx, magpie.PermissionLedgerRead); err != nil {
+			return err
+		}
+		return writeJSON(out, st.BankTransactions)
+	default:
+		return fmt.Errorf("unknown bank transaction command %q", args[0])
+	}
+}
+
+func (a app) bankTransfer(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("bank transfer command required")
+	}
+	fs := newFlagSet("bank transfer " + args[0])
+	fromID := fs.String("from-transaction-id", "", "outgoing transaction id")
+	toID := fs.String("to-transaction-id", "", "incoming transaction id")
+	reason := fs.String("reason", "", "audited transfer reversal reason")
+	date := fs.String("date", "", "optional reversal date; must match every original leg, so omit for cross-period transfers")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	var transactions []magpie.BankTransaction
+	var root string
+	var err error
+	switch args[0] {
+	case "pair":
+		transactions, root, err = a.store.PairBankTransfer(a.ctx, *fromID, *toID)
+	case "reverse":
+		transactions, root, err = a.store.ReverseBankTransfer(a.ctx, *fromID, *toID, *reason, *date)
+	default:
+		return fmt.Errorf("unknown bank transfer command %q", args[0])
+	}
+	if err != nil {
+		return err
+	}
+	return writeJSON(out, map[string]any{"root": root, "transactions": transactions})
+}
+
+func (a app) bankReconciliation(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("bank reconciliation command required")
+	}
+	fs := newFlagSet("bank reconciliation " + args[0])
+	statementID := fs.String("statement-id", "", "Magpie bank statement id")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	switch args[0] {
+	case "preview":
+		report, err := a.store.PreviewBankReconciliation(a.ctx, *statementID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, report)
+	case "complete":
+		report, root, err := a.store.CompleteBankReconciliation(a.ctx, *statementID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "reconciliation": report})
+	default:
+		return fmt.Errorf("unknown bank reconciliation command %q", args[0])
 	}
 }
 
@@ -694,6 +862,16 @@ Commands:
   payout import-json --file payout.json
   payout get --payout-id ID
   payout list
+  bank statement import-json --file statement.json
+  bank transaction import-json --file transaction.json
+  bank transaction post --transaction-id ID --account-id ID
+  bank transaction reverse --transaction-id ID --reason REASON [--date YYYY-MM-DD]
+  bank transaction reclassify --transaction-id ID --account-id ID --reason REASON
+  bank transaction list
+  bank transfer pair --from-transaction-id ID --to-transaction-id ID
+  bank transfer reverse --from-transaction-id ID --to-transaction-id ID --reason REASON [--date YYYY-MM-DD]
+  bank reconciliation preview --statement-id ID
+  bank reconciliation complete --statement-id ID
   rbac defaults repair
   rbac permissions
   rbac role set --name NAME --permissions p1,p2
