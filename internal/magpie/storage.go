@@ -44,16 +44,18 @@ type eventEnvelope struct {
 }
 
 var legacyMagpieNodeTypes = map[string]struct{}{
-	"book.settings":  {},
-	"customer":       {},
-	"invoice":        {},
-	"ledger.account": {},
-	"ledger.journal": {},
-	"note":           {},
-	"payout":         {},
-	"rbac.role":      {},
-	"rbac.user":      {},
-	"store.init":     {},
+	"book.settings":    {},
+	"bank.statement":   {},
+	"bank.transaction": {},
+	"customer":         {},
+	"invoice":          {},
+	"ledger.account":   {},
+	"ledger.journal":   {},
+	"note":             {},
+	"payout":           {},
+	"rbac.role":        {},
+	"rbac.user":        {},
+	"store.init":       {},
 }
 
 var foreignApplicationPrefixes = []string{
@@ -386,6 +388,55 @@ func (s *Store) applyNodeWithMetadata(st *State, node Node) (bool, error) {
 			return false, appErr(ErrValidation, "payout.update references unknown payout %s", ev.Payout.ID)
 		}
 		st.Payouts[ev.Payout.ID] = ev.Payout
+	case "bank.statement.create":
+		var ev bankStatementPayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return false, err
+		}
+		if _, ok := st.BankStatements[ev.Statement.ID]; ok {
+			return false, appErr(ErrValidation, "bank.statement.create references existing statement %s", ev.Statement.ID)
+		}
+		st.BankStatements[ev.Statement.ID] = ev.Statement
+	case "bank.statement.update":
+		var ev bankStatementPayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return false, err
+		}
+		if _, ok := st.BankStatements[ev.Statement.ID]; !ok {
+			return false, appErr(ErrValidation, "bank.statement.update references unknown statement %s", ev.Statement.ID)
+		}
+		st.BankStatements[ev.Statement.ID] = ev.Statement
+	case "bank.transaction.create":
+		var ev bankTransactionPayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return false, err
+		}
+		if _, ok := st.BankTransactions[ev.Transaction.ID]; ok {
+			return false, appErr(ErrValidation, "bank.transaction.create references existing transaction %s", ev.Transaction.ID)
+		}
+		st.BankTransactions[ev.Transaction.ID] = ev.Transaction
+	case "bank.transaction.update":
+		var ev bankTransactionPayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return false, err
+		}
+		if _, ok := st.BankTransactions[ev.Transaction.ID]; !ok {
+			return false, appErr(ErrValidation, "bank.transaction.update references unknown transaction %s", ev.Transaction.ID)
+		}
+		st.BankTransactions[ev.Transaction.ID] = ev.Transaction
+	case "bank.transfer.pair":
+		var ev bankTransferPairPayload
+		if err := json.Unmarshal(env.Data, &ev); err != nil {
+			return false, err
+		}
+		if _, ok := st.BankTransactions[ev.From.ID]; !ok {
+			return false, appErr(ErrValidation, "bank.transfer.pair references unknown transaction %s", ev.From.ID)
+		}
+		if _, ok := st.BankTransactions[ev.To.ID]; !ok {
+			return false, appErr(ErrValidation, "bank.transfer.pair references unknown transaction %s", ev.To.ID)
+		}
+		st.BankTransactions[ev.From.ID] = ev.From
+		st.BankTransactions[ev.To.ID] = ev.To
 	case "settings.update":
 		var ev settingsUpdatePayload
 		if err := json.Unmarshal(env.Data, &ev); err != nil {

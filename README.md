@@ -50,8 +50,8 @@ outside its current scope:
 
 - native QuickBooks CSV, IIF, or QBXML parsing; agents must normalize source
   data into Magpie's JSON contracts;
-- bills, bank matching or reconciliation, period close, tax, loan, transfer,
-  fixed-asset, retention, garbage-collection, or point-in-time restore commands;
+- bills, period close, tax, loan, fixed-asset, retention, garbage-collection,
+  or point-in-time restore commands;
 - note search, backlinks, typed cross-entity references, diff, or graph
   navigation;
 - a human-oriented output mode, interactive UI, signed command envelopes, or an
@@ -86,6 +86,7 @@ AGPL-3.0-or-later. See `LICENSE`.
 - Chart account roles for workflow-safe account selection.
 - Privileged manual journal adjustments with required audit reasons.
 - First-class customer, invoice, and payout workflows that generate basis-aware journals.
+- Provider-neutral bank/card statement and transaction workflows with transfer pairing, append-only corrections, and guarded reconciliation completion.
 - Structured external source references on ledger accounts.
 - Markdown note create, update, list, and get operations.
 - Source-tagged journal entries for agent-mapped exports from QuickBooks or other systems.
@@ -752,11 +753,92 @@ List payout source documents:
 ./magpie --store .magpie --actor bookkeeping-agent payout list
 ```
 
+## Bank And Card Reconciliation
+
+Magpie accepts canonical JSON; normalize institution-specific CSV, OFX/QFX,
+PDF, and API payloads outside Magpie. Statement accounts must use
+`operating_cash`, `bank_account`, or the liability role `credit_card`.
+`amount_cents` is the signed change to the statement balance: positive
+increases the balance, negative decreases it. For a credit card, an increase is
+a ledger credit and a payment/decrease is a ledger debit.
+
+Import a statement and one transaction:
+
+```json
+{
+  "account_id": "acct:BANK_ID",
+  "period_start": "2026-06-01",
+  "period_end": "2026-06-30",
+  "opening_balance_cents": 100000,
+  "closing_balance_cents": 97500,
+  "currency": "USD",
+  "external_refs": [{"source_system":"normalized_feed","external_id":"statement-2026-06","external_type":"statement"}],
+  "source_document": {"id":"doc-opaque-1","content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+}
+```
+
+```sh
+./magpie --store .magpie --actor bookkeeping-agent bank statement import-json --file statement.json
+./magpie --store .magpie --actor bookkeeping-agent bank transaction import-json --file transaction.json
+./magpie --store .magpie --actor bookkeeping-agent bank transaction post \
+  --transaction-id btxn:... --account-id acct:EXPENSE_ID
+```
+
+A canonical transaction includes `statement_id`, the same `account_id` and
+`currency` as its statement, `date`, nonzero signed `amount_cents`, and a
+stable `external_refs` identity. Imports are staged. Pending rows cannot be
+posted or paired. Posting creates a balanced `bank.transaction.post` workflow
+journal and requires `ledger:write`, not `journal:adjust`. Selecting another
+bank/card account is rejected; use transfer pairing so cash movement cannot be
+misstated as income or expense:
+
+```sh
+./magpie --store .magpie --actor bookkeeping-agent bank transfer pair \
+  --from-transaction-id btxn:... --to-transaction-id btxn:...
+```
+
+Pairing requires equal amounts with opposite ledger effects, matching
+currencies, different book accounts, and two settled staged rows. This also
+handles bank-to-credit-card payments, whose statement amounts can have the same
+sign because asset and liability normal balances differ. Each transaction can
+belong to only one pair.
+
+Corrections append journals and retain the original decision:
+
+```sh
+./magpie --store .magpie --actor bookkeeping-agent bank transaction reclassify \
+  --transaction-id btxn:... --account-id acct:NEW_EXPENSE_ID --reason "receipt reviewed"
+./magpie --store .magpie --actor bookkeeping-agent bank transaction reverse \
+  --transaction-id btxn:... --date 2026-06-20 --reason "source transaction was voided"
+```
+
+Reclassification moves the classification between accounts without changing
+the bank posting. Reversal creates exact offsetting workflow journals. Neither
+operation edits or deletes an earlier event.
+
+Preview before completing reconciliation:
+
+```sh
+./magpie --store .magpie --actor bookkeeping-agent bank reconciliation preview --statement-id stmt:...
+./magpie --store .magpie --actor bookkeeping-agent bank reconciliation complete --statement-id stmt:...
+```
+
+The JSON report includes opening balance, statement activity, closing balance,
+ledger balance through the period end, ledger and activity differences, and
+unmatched, duplicate, pending, and out-of-period items. Completion fails closed
+unless both differences are zero and all blocker arrays are empty. A completed
+statement is immutable.
+
+Bank import `external_refs` accept only `source_system`, `external_id`, and
+`external_type`. Reference source evidence with an opaque `source_document.id`
+and a lowercase SHA-256 content hash; do not put counterparties, descriptions,
+account numbers, URLs, or other PII into immutable import metadata.
+
 ## Manual Journal Adjustments
 
 Generic journal creation is restricted. It requires both `ledger:write` and `journal:adjust`, and it must include a `manual_reason`. Default `Owner` and `Admin` roles have `journal:adjust`; ordinary bookkeeping agents should not.
 
-Manual journals are for controlled adjustments, opening/import work, and emergency correction workflows until first-class domain workflows exist. Future bill, bank-match, tax, loan, transfer, and fixed-asset commands should generate workflow-originated journals instead of asking agents to hand-author postings.
+Manual journals are for controlled adjustments, opening/import work, and emergency correction workflows until first-class domain workflows exist. Future bill, tax, loan, and fixed-asset commands should generate workflow-originated journals instead of asking agents to hand-author postings.
 
 Create a balanced manual journal JSON file:
 

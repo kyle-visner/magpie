@@ -149,7 +149,7 @@ command list; use this guide and the README for command-specific contracts.
 - Select accounts by their typed `role`, then use the returned account ID.
   Display names and chart numbers are not semantic contracts.
 - Never change the book's accounting basis per transaction.
-- Prefer first-class invoice and payout commands for ordinary activity.
+- Prefer first-class invoice, payout, and bank commands for ordinary activity.
 - Generic `ledger journal create` is a privileged manual adjustment or import
   path. It requires `ledger:write`, `journal:adjust`, a balanced entry, and a
   nonempty `manual_reason`.
@@ -158,6 +158,9 @@ command list; use this guide and the README for command-specific contracts.
 - Corrections preserve history. Reverse an invoice payment with
   `invoice reverse-payment`; do not attempt to edit or delete the original
   payment or journal.
+- Import institution-specific statement data only after normalizing it to the
+  provider-neutral bank JSON contracts. Do not put PII in bank external-ref
+  metadata; use opaque source-document IDs and SHA-256 content hashes.
 
 Magpie supports `cash`, `modified_cash`, and `accrual` books. Invoice posting
 differs by basis:
@@ -201,6 +204,31 @@ without payment evidence is rejected.
 `payout import-json` requires a destination bank/cash account and, when a fee is
 present, an account with `merchant_fees_expense`. It creates the payout and its
 workflow journals idempotently from external references.
+
+`bank statement import-json` creates an open statement for an
+`operating_cash`, `bank_account`, or liability `credit_card` account.
+`bank transaction import-json` stages a row by stable external reference.
+`amount_cents` is the signed statement-balance change; positive increases the
+balance and negative decreases it. A pending transaction cannot be posted or
+paired.
+
+Use `bank transaction post --transaction-id ID --account-id ID` to classify an
+ordinary receipt, expense, refund, owner contribution, owner draw, or supported
+balance-sheet movement. It creates a workflow journal with `ledger:write` and
+does not require `journal:adjust`. Another bank/card account is not a valid
+classification; pair the two staged source rows with `bank transfer pair`.
+Pairing requires matching currency, equal amounts, opposite ledger effects,
+and different accounts, and produces one journal with no income or expense.
+
+Use `bank transaction reclassify` or `bank transaction reverse` for audited
+corrections. Both append workflow journals and preserve earlier events.
+Reversal offsets every journal contributing to the transaction's current
+classification exactly.
+
+Run `bank reconciliation preview` after all source rows are imported. Completion
+requires zero ledger difference, zero opening-plus-activity difference, and no
+unmatched, duplicate, pending, or out-of-period blockers. A completed statement
+rejects later transaction imports and corrections.
 
 For provider-specific CSV, IIF, QBXML, API, PDF, or spreadsheet data, parsing
 belongs outside Magpie. Preserve the original evidence and perform an explicit
@@ -260,6 +288,15 @@ invoice list
 payout import-json --file payout.json
 payout get --payout-id ID
 payout list
+bank statement import-json --file statement.json
+bank transaction import-json --file transaction.json
+bank transaction post --transaction-id ID --account-id ID
+bank transaction reverse --transaction-id ID --reason REASON [--date YYYY-MM-DD]
+bank transaction reclassify --transaction-id ID --account-id ID --reason REASON
+bank transaction list
+bank transfer pair --from-transaction-id ID --to-transaction-id ID
+bank reconciliation preview --statement-id ID
+bank reconciliation complete --statement-id ID
 rbac defaults repair
 rbac permissions
 rbac role set --name NAME --permissions p1,p2

@@ -349,6 +349,7 @@ func accountRoleTypes() map[AccountRole]AccountType {
 	return map[AccountRole]AccountType{
 		AccountRoleOperatingCash:           AccountAsset,
 		AccountRoleBankAccount:             AccountAsset,
+		AccountRoleCreditCard:              AccountLiability,
 		AccountRoleAccountsReceivable:      AccountAsset,
 		AccountRoleUndepositedFunds:        AccountAsset,
 		AccountRoleInventory:               AccountAsset,
