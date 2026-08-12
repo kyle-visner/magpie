@@ -212,20 +212,22 @@ func invoiceCloseBlockers(st State, through string) []CloseBlocker {
 	blockers := []CloseBlocker{}
 	basis := st.effectiveSettings().AccountingBasis
 	for _, invoice := range st.Invoices {
-		if invoice.InvoiceDate > through || invoice.Status == SourceDocumentVoid {
-			continue
-		}
-		if invoice.Status == SourceDocumentImported {
-			blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s is staged but not posted", invoice.InvoiceNumber)})
-		}
-		if basis == AccountingBasisAccrual && invoice.Status != SourceDocumentImported && invoice.IssuedJournalEntryID == "" {
-			blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("accrual invoice %s has no issuance journal", invoice.InvoiceNumber)})
-		}
-		if invoice.IssuedJournalEntryID != "" {
-			if !linkedJournalExists(st, invoice.IssuedJournalEntryID, "invoice", invoice.ID) {
-				blockers = append(blockers, CloseBlocker{Code: "missing_linked_journal", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s issuance journal %s is missing", invoice.InvoiceNumber, invoice.IssuedJournalEntryID)})
+		if invoice.InvoiceDate <= through && invoice.Status != SourceDocumentVoid {
+			if invoice.Status == SourceDocumentImported {
+				blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s is staged but not posted", invoice.InvoiceNumber)})
+			}
+			if basis == AccountingBasisAccrual && invoice.Status != SourceDocumentImported && invoice.IssuedJournalEntryID == "" {
+				blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("accrual invoice %s has no issuance journal", invoice.InvoiceNumber)})
+			}
+			if invoice.IssuedJournalEntryID != "" {
+				if !linkedJournalExists(st, invoice.IssuedJournalEntryID, "invoice", invoice.ID) {
+					blockers = append(blockers, CloseBlocker{Code: "missing_linked_journal", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s issuance journal %s is missing", invoice.InvoiceNumber, invoice.IssuedJournalEntryID)})
+				}
 			}
 		}
+		// Payment and reversal dates are independent accounting dates. The
+		// current domain allows them to precede InvoiceDate, so they must be
+		// inspected even when the invoice itself is future-dated.
 		for _, payment := range invoice.Payments {
 			if payment.Date <= through && (payment.JournalEntryID == "" || !linkedJournalExists(st, payment.JournalEntryID, "invoice", invoice.ID)) {
 				blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s payment %s has no durable journal", invoice.InvoiceNumber, payment.ID)})
@@ -248,12 +250,18 @@ func payoutCloseBlockers(st State, through string) []CloseBlocker {
 		if payout.FeeAmountCents > 0 {
 			expected = 2
 		}
-		valid := len(payout.JournalEntryIDs) == expected
-		for _, journalID := range payout.JournalEntryIDs {
-			valid = valid && linkedJournalExists(st, journalID, "payout", payout.ID)
+		if len(payout.JournalEntryIDs) != expected {
+			blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: payout.ID, Message: fmt.Sprintf("payout %s has %d of %d required journal references", payout.ID, len(payout.JournalEntryIDs), expected)})
+			continue
 		}
-		if !valid {
-			blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: payout.ID, Message: fmt.Sprintf("payout %s has %d of %d required durable journals", payout.ID, len(payout.JournalEntryIDs), expected)})
+		missing := []string{}
+		for _, journalID := range payout.JournalEntryIDs {
+			if !linkedJournalExists(st, journalID, "payout", payout.ID) {
+				missing = append(missing, journalID)
+			}
+		}
+		if len(missing) > 0 {
+			blockers = append(blockers, CloseBlocker{Code: "missing_linked_journal", EntityID: payout.ID, Message: fmt.Sprintf("payout %s has expected journal-reference count %d, but these references are missing or unrelated: %s", payout.ID, expected, strings.Join(missing, ", "))})
 		}
 	}
 	return blockers
@@ -416,15 +424,8 @@ func (s *Store) buildClosePackage(close PeriodClose) (ClosePackage, error) {
 	if err != nil {
 		return ClosePackage{}, err
 	}
-	for name, expected := range close.Manifest.ReportSHA256 {
-		data, ok := files[name]
-		if !ok {
-			return ClosePackage{}, appErr(ErrIntegrity, "close package artifact %s is missing", name)
-		}
-		sum := sha256.Sum256(data)
-		if actual := hex.EncodeToString(sum[:]); actual != expected {
-			return ClosePackage{}, appErr(ErrIntegrity, "close package artifact %s hash mismatch", name)
-		}
+	if err := verifyReportHashes(files, close.Manifest.ReportSHA256); err != nil {
+		return ClosePackage{}, err
 	}
 	manifest, err := json.MarshalIndent(close, "", "  ")
 	if err != nil {
@@ -432,6 +433,35 @@ func (s *Store) buildClosePackage(close PeriodClose) (ClosePackage, error) {
 	}
 	files["manifest.json"] = append(manifest, '\n')
 	return ClosePackage{Close: close, Files: files}, nil
+}
+
+func verifyReportHashes(files map[string][]byte, sealed map[string]string) error {
+	fileNames := make([]string, 0, len(files))
+	for name := range files {
+		fileNames = append(fileNames, name)
+	}
+	sort.Strings(fileNames)
+	for _, name := range fileNames {
+		expected, ok := sealed[name]
+		if !ok {
+			return appErr(ErrIntegrity, "close package artifact %s is not sealed by the manifest", name)
+		}
+		sum := sha256.Sum256(files[name])
+		if actual := hex.EncodeToString(sum[:]); actual != expected {
+			return appErr(ErrIntegrity, "close package artifact %s hash mismatch", name)
+		}
+	}
+	sealedNames := make([]string, 0, len(sealed))
+	for name := range sealed {
+		sealedNames = append(sealedNames, name)
+	}
+	sort.Strings(sealedNames)
+	for _, name := range sealedNames {
+		if _, ok := files[name]; !ok {
+			return appErr(ErrIntegrity, "sealed close package artifact %s is missing", name)
+		}
+	}
+	return nil
 }
 
 func closeReportParameters(st State, through string) (CloseReportParameters, error) {

@@ -79,7 +79,12 @@ func TestClosePreviewCoversEveryCurrentStagedDomainType(t *testing.T) {
 		t.Fatal(err)
 	}
 	payout := Payout{ID: "payout:staged", Date: "2026-06-20", NetAmountCents: 100, JournalEntryIDs: []string{}}
-	if _, err := s.appendEventAt(owner, "payout", payout.ID, "test staged payout", wrapEvent("payout.create", payoutCreatePayload{Payout: payout}), st.Root); err != nil {
+	root, err := s.appendEventAt(owner, "payout", payout.ID, "test staged payout", wrapEvent("payout.create", payoutCreatePayload{Payout: payout}), st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokenPayout := Payout{ID: "payout:broken-link", Date: "2026-06-21", NetAmountCents: 100, JournalEntryIDs: []string{"jrnl:missing"}}
+	if _, err := s.appendEventAt(owner, "payout", brokenPayout.ID, "test broken payout link", wrapEvent("payout.create", payoutCreatePayload{Payout: brokenPayout}), root); err != nil {
 		t.Fatal(err)
 	}
 
@@ -92,6 +97,60 @@ func TestClosePreviewCoversEveryCurrentStagedDomainType(t *testing.T) {
 	}
 	if !hasBlockerForEntity(preview, "unposted_source_document", payout.ID) {
 		t.Fatalf("staged payout was not blocked: %#v", preview.Blockers)
+	}
+	brokenLink, ok := blockerForEntity(preview, "missing_linked_journal", brokenPayout.ID)
+	if !ok || !strings.Contains(brokenLink.Message, "expected journal-reference count 1") || !strings.Contains(brokenLink.Message, "jrnl:missing") {
+		t.Fatalf("equal-count broken payout link was not distinguished: %#v", preview.Blockers)
+	}
+}
+
+func TestClosePreviewScansPaymentDatesOnFutureDatedInvoice(t *testing.T) {
+	s, owner := newTestStore(t)
+	bank := mustRoleAccount(t, s, owner, "1010", "Bank", AccountAsset, AccountRoleOperatingCash)
+	if _, _, err := s.SetAccountExternalRef(owner, bank.ID, ExternalSourceRef{SourceSystem: "bank", ExternalID: "future-invoice-bank", Metadata: map[string]string{"reconciled_through": "2026-06-30"}}); err != nil {
+		t.Fatal(err)
+	}
+	revenue := mustRoleAccount(t, s, owner, "4000", "Revenue", AccountRevenue, AccountRoleDefaultServiceRevenue)
+	customer, _, err := s.UpsertCustomer(owner, Customer{Name: "Future Invoice Customer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoice, _, err := s.CreateInvoice(owner, Invoice{
+		InvoiceNumber: "INV-FUTURE", CustomerID: customer.ID, InvoiceDate: "2026-07-01",
+		LineItems:     []InvoiceLineItem{{Description: "Service", RevenueAccountID: revenue.ID, Quantity: 1, UnitAmountCents: 100, AmountCents: 100}},
+		SubtotalCents: 100, TotalCents: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoice, _, err = s.PostInvoice(owner, invoice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoice, _, err = s.MarkInvoicePaid(owner, invoice.ID, InvoicePaymentRequest{Date: "2026-06-15", AmountCents: 100, CashAccountID: bank.ID})
+	if err != nil {
+		t.Fatalf("domain no longer permits payment before invoice date: %v", err)
+	}
+	invoice.Payments[0].JournalEntryID = "jrnl:missing-payment"
+	invoice.Payments[0].Reversed = true
+	invoice.Payments[0].ReversalDate = "2026-06-20"
+	invoice.Payments[0].ReversalJournalEntryID = "jrnl:missing-reversal"
+	st := mustState(t, s)
+	if _, err := s.appendEventAt(owner, "invoice", invoice.ID, "test broken future invoice payment links", wrapEvent("invoice.update", invoiceUpdatePayload{Invoice: invoice}), st.Root); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := s.PreviewPeriodClose(owner, "2026-06-30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymentBlockers := 0
+	for _, blocker := range preview.Blockers {
+		if blocker.EntityID == invoice.ID && blocker.Code == "unposted_source_document" {
+			paymentBlockers++
+		}
+	}
+	if paymentBlockers != 2 {
+		t.Fatalf("future-dated invoice payment and reversal were not independently scanned: %#v", preview.Blockers)
 	}
 }
 
@@ -469,6 +528,38 @@ func TestCanonicalEmptyReportsUseStableCollections(t *testing.T) {
 	}
 }
 
+func TestBuildClosePackageRecomputesAndRequiresEverySealedHash(t *testing.T) {
+	s, owner := newTestStore(t)
+	close, err := s.CompletePeriodClose(owner, "2026-06-30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.buildClosePackage(close); err != nil {
+		t.Fatalf("valid sealed package failed verification: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(map[string]string)
+	}{
+		{name: "missing seal", mutate: func(hashes map[string]string) { delete(hashes, "trial-balance.json") }},
+		{name: "wrong seal", mutate: func(hashes map[string]string) { hashes["trial-balance.json"] = strings.Repeat("0", 64) }},
+		{name: "extra seal", mutate: func(hashes map[string]string) { hashes["not-generated.json"] = strings.Repeat("0", 64) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := close
+			candidate.Manifest.ReportSHA256 = cloneHashes(close.Manifest.ReportSHA256)
+			test.mutate(candidate.Manifest.ReportSHA256)
+			_, err := s.buildClosePackage(candidate)
+			var app *AppError
+			if !errors.As(err, &app) || app.Code != ErrIntegrity {
+				t.Fatalf("expected buildClosePackage integrity failure, got %v", err)
+			}
+		})
+	}
+}
+
 func hasBlocker(preview ClosePreview, code string) bool {
 	for _, blocker := range preview.Blockers {
 		if blocker.Code == code {
@@ -479,12 +570,17 @@ func hasBlocker(preview ClosePreview, code string) bool {
 }
 
 func hasBlockerForEntity(preview ClosePreview, code, entityID string) bool {
+	_, ok := blockerForEntity(preview, code, entityID)
+	return ok
+}
+
+func blockerForEntity(preview ClosePreview, code, entityID string) (CloseBlocker, bool) {
 	for _, blocker := range preview.Blockers {
 		if blocker.Code == code && blocker.EntityID == entityID {
-			return true
+			return blocker, true
 		}
 	}
-	return false
+	return CloseBlocker{}, false
 }
 
 func assertClosedPeriodError(t *testing.T, err error) {
@@ -502,6 +598,14 @@ func mustState(t *testing.T, s *Store) State {
 		t.Fatal(err)
 	}
 	return st
+}
+
+func cloneHashes(input map[string]string) map[string]string {
+	out := make(map[string]string, len(input))
+	for name, hash := range input {
+		out[name] = hash
+	}
+	return out
 }
 
 func postManual(t *testing.T, s *Store, ctx Context, date, memo string, debit, credit Account, amount int64) {
