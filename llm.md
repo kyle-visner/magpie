@@ -7,8 +7,9 @@ boundaries, read [`README.md`](README.md) and
 
 ## What Magpie is
 
-Magpie is an opinionated accounting CLI backed by an append-only Jaybase event
-history. Humans and agents use the same commands. The domain layer enforces
+Magpie is an opinionated accounting CLI **and MCP server** backed by an append-only Jaybase event
+history. Humans and agents use the same domain operations. The CLI and the MCP
+server are two adapters over that API. They do not wrap each other. The domain layer enforces
 role-based permissions, accounting-basis rules, account roles, balanced
 double-entry journals, source-document workflow rules, and source-key
 idempotency before a write is appended.
@@ -20,7 +21,31 @@ contracts, use existing account IDs and roles, and obtain human approval when
 the accounting treatment is uncertain.
 
 Never read or edit `.magpie/`, Jaybase data files, refs, or encryption keys
-directly. The CLI is the supported interface.
+directly. The CLI and the MCP server are the supported interfaces.
+
+## Two interfaces
+
+Use the CLI when a human or a local script is driving Magpie. Use MCP when an
+existing agent (ChatGPT, Claude, Grok, Cursor, Hermes, or any MCP client) should
+keep the books.
+
+```sh
+# Local stdio MCP (Claude Desktop, Cursor, Hermes)
+magpie --store /absolute/path/to/book.magpie --actor owner mcp
+
+# Remote Streamable HTTP MCP (ChatGPT / Claude / Grok connectors)
+export MAGPIE_MCP_TOKEN='connector-token-from-the-secret-manager'
+magpie --actor owner mcp --http 127.0.0.1:8787
+```
+
+HTTP MCP requires `MAGPIE_MCP_TOKEN` or `MAGPIE_MCP_TOKEN_FILE`. That token authenticates
+the connector. It is not `JAYBASE_TOKEN`. Hosted Jaybase accepts `JAYBASE_TOKEN` or
+`JAYBASE_TOKEN_FILE`. The process `--actor` is bound at
+server start; tools cannot change it. Hosted Jaybase credentials stay on the
+host and are never accepted from an MCP client.
+
+MCP tools are the Magpie command map (`book_settings_get`, `ledger_account_list`,
+`invoice_import`, …). Arguments are JSON objects, not argv and not files.
 
 ## Install
 
@@ -278,6 +303,7 @@ note put --title TITLE --body-file FILE
 note get --id ID
 note list
 snapshot create --name NAME
+mcp [--http ADDR]
 ```
 
 `state` and `audit` expose broad reconstructed or historical data and require

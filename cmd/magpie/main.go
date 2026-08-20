@@ -52,7 +52,7 @@ func run(args []string, out io.Writer) error {
 	var store *magpie.Store
 	var err error
 	if strings.TrimSpace(*jaybaseURL) != "" {
-		store, err = magpie.OpenRemoteStore(*jaybaseURL, os.Getenv("JAYBASE_TOKEN"))
+		store, err = magpie.OpenRemoteStore(*jaybaseURL, magpie.SecretFromEnv("JAYBASE_TOKEN"))
 	} else {
 		store, err = magpie.OpenStore(*storeDir)
 	}
@@ -106,6 +106,8 @@ func run(args []string, out io.Writer) error {
 		return a.note(rest[1:], out)
 	case "snapshot":
 		return a.snapshot(rest[1:], out)
+	case "mcp":
+		return a.mcp(rest[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q", rest[0])
 	}
@@ -711,6 +713,7 @@ Commands:
   note get --id ID
   note list
   snapshot create --name NAME
+  mcp [--http ADDR]
 
 Global flags:
   --store DIR

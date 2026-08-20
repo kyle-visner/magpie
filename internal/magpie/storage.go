@@ -76,7 +76,12 @@ func newStore(db storageBackend) *Store {
 }
 
 func (s *Store) Close() error {
-	return storageError(s.db.Close())
+	if s == nil || s.db == nil {
+		return nil
+	}
+	err := storageError(s.db.Close())
+	s.db = nil
+	return err
 }
 
 func (b *localStorageBackend) Close() error {
