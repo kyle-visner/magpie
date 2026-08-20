@@ -165,6 +165,50 @@ func TestMCPOpenerReleasesStoreSoCLICanInterleave(t *testing.T) {
 	}
 }
 
+func TestMCPStructuredContentIsObjectForEveryTool(t *testing.T) {
+	store, err := magpie.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	server := newMCPServer(magpie.NewBook(store, magpie.Context{Actor: "owner"}))
+	if resp := mustHandle(t, server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"init","arguments":{}}}`); resp.Error != nil {
+		t.Fatal(resp.Error)
+	}
+
+	for i, tool := range magpie.ToolCatalog() {
+		raw := mustHandle(t, server, `{"jsonrpc":"2.0","id":`+itoa(i+2)+`,"method":"tools/call","params":{"name":"`+tool.Name+`","arguments":{}}}`)
+		if raw.Error != nil {
+			t.Fatalf("%s rpc error: %+v", tool.Name, raw.Error)
+		}
+		body := asMap(t, raw.Result)
+		assertJSONObject(t, tool.Name+" structuredContent", body["structuredContent"])
+	}
+
+	roles := callStructured(t, server, 100, "ledger_account_role_list", "{}")
+	assertStringCatalog(t, "roles", roles["roles"], "operating_cash")
+	perms := callStructured(t, server, 101, "rbac_permissions", "{}")
+	assertStringCatalog(t, "permissions", perms["permissions"], "ledger:read")
+	audit := callStructured(t, server, 102, "audit", "{}")
+	if _, ok := audit["events"]; !ok {
+		t.Fatalf("audit structuredContent must include events, got %#v", audit)
+	}
+}
+
+func TestMCPWrapsArrayInvokeResultAsObject(t *testing.T) {
+	server := &mcpServer{invoke: func(name string, args json.RawMessage) (any, error) {
+		return []string{"operating_cash", "ledger:read"}, nil
+	}}
+	raw := mustHandle(t, server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ledger_account_role_list","arguments":{}}}`)
+	if raw.Error != nil {
+		t.Fatal(raw.Error)
+	}
+	body := asMap(t, raw.Result)
+	content := asMap(t, body["structuredContent"])
+	assertJSONObject(t, "wrapped array", content)
+	assertStringCatalog(t, "items", content["items"], "operating_cash")
+}
+
 func TestMCPStdioRoundTrip(t *testing.T) {
 	store, err := magpie.OpenStore(t.TempDir())
 	if err != nil {
@@ -196,6 +240,52 @@ func mustHandle(t *testing.T, server *mcpServer, raw string) *rpcResponse {
 		t.Fatal("expected response")
 	}
 	return resp
+}
+
+func callStructured(t *testing.T, server *mcpServer, id int, name, args string) map[string]any {
+	t.Helper()
+	if args == "" {
+		args = "{}"
+	}
+	raw := mustHandle(t, server, `{"jsonrpc":"2.0","id":`+itoa(id)+`,"method":"tools/call","params":{"name":"`+name+`","arguments":`+args+`}}`)
+	if raw.Error != nil {
+		t.Fatalf("%s rpc error: %+v", name, raw.Error)
+	}
+	body := asMap(t, raw.Result)
+	if body["isError"] == true {
+		t.Fatalf("%s tool error: %#v", name, body)
+	}
+	return asMap(t, body["structuredContent"])
+}
+
+func assertJSONObject(t *testing.T, label string, value any) {
+	t.Helper()
+	buf, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(buf)), "{") {
+		t.Fatalf("%s must be a JSON object, got %s", label, buf)
+	}
+}
+
+func assertStringCatalog(t *testing.T, field string, value any, required string) {
+	t.Helper()
+	items, ok := value.([]any)
+	if !ok {
+		t.Fatalf("expected %s array, got %#v", field, value)
+	}
+	found := false
+	for _, item := range items {
+		name, _ := item.(string)
+		if name == required {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected %s to include %q, got %#v", field, required, items)
+	}
 }
 
 func asMap(t *testing.T, value any) map[string]any {

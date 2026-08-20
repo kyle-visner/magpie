@@ -76,6 +76,56 @@ func TestBookIsFirstClassPathForInitChartAndJournal(t *testing.T) {
 	}
 }
 
+func TestBookInvokeListCatalogsReturnObjects(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	book := NewBook(store, Context{Actor: "owner"})
+	if _, err := book.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	roles, err := book.Invoke("ledger_account_role_list", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCatalogField(t, "roles", roles, "operating_cash")
+
+	perms, err := book.Invoke("rbac_permissions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCatalogField(t, "permissions", perms, "ledger:read")
+
+	audit, err := book.Invoke("audit", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditObj, ok := audit.(map[string]any)
+	if !ok {
+		t.Fatalf("audit must be an object, got %#v", audit)
+	}
+	if _, ok := auditObj["events"]; !ok {
+		t.Fatalf("audit object must include events, got %#v", auditObj)
+	}
+
+	for _, name := range []string{"ledger_account_list", "ledger_journal_list", "customer_list", "invoice_list", "payout_list", "note_list"} {
+		listed, err := book.Invoke(name, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf, err := json.Marshal(listed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(buf) == 0 || buf[0] != '{' {
+			t.Fatalf("%s must return a JSON object, got %s", name, buf)
+		}
+	}
+}
+
 func TestBookRejectsUnknownToolAndUnknownField(t *testing.T) {
 	store, err := OpenStore(t.TempDir())
 	if err != nil {
@@ -108,6 +158,28 @@ func TestBookBindsActorFromContextNotFromParams(t *testing.T) {
 	if _, err := ops.Invoke("ledger_account_list", json.RawMessage(`{"actor":"owner"}`)); err == nil {
 		t.Fatal("expected Operations actor to be denied even if params mention owner")
 	}
+}
+
+func assertCatalogField(t *testing.T, field string, value any, required string) {
+	t.Helper()
+	obj, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("%s must be an object, got %#v", field, value)
+	}
+	raw, ok := obj[field]
+	if !ok {
+		t.Fatalf("missing %s field: %#v", field, obj)
+	}
+	names, ok := raw.([]string)
+	if !ok {
+		t.Fatalf("expected %s []string, got %#v", field, raw)
+	}
+	for _, name := range names {
+		if name == required {
+			return
+		}
+	}
+	t.Fatalf("expected %s to include %q, got %#v", field, required, names)
 }
 
 func nestedID(t *testing.T, value any, key string) string {
