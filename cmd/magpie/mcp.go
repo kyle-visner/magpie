@@ -136,7 +136,8 @@ func (s *mcpServer) callTool(params json.RawMessage) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	text, err := magpie.EncodeJSON(result)
+	structured := mcpStructuredContent(result)
+	text, err := magpie.EncodeJSON(structured)
 	if err != nil {
 		return nil, err
 	}
@@ -144,9 +145,29 @@ func (s *mcpServer) callTool(params json.RawMessage) (map[string]any, error) {
 		"content": []map[string]any{
 			{"type": "text", "text": string(text)},
 		},
-		"structuredContent": result,
+		"structuredContent": structured,
 		"isError":           false,
 	}, nil
+}
+
+// mcpStructuredContent keeps MCP structuredContent a JSON object. Clients that
+// validate the field as a record reject a top-level array.
+func mcpStructuredContent(result any) any {
+	if result == nil {
+		return map[string]any{}
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return result
+	}
+	if isJSONObject(raw) {
+		return result
+	}
+	return map[string]any{"items": result}
+}
+
+func isJSONObject(raw []byte) bool {
+	return strings.HasPrefix(strings.TrimSpace(string(raw)), "{")
 }
 
 func toolError(err error) map[string]any {

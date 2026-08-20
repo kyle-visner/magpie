@@ -295,7 +295,11 @@ func (b *Book) Invoke(name string, params json.RawMessage) (any, error) {
 	case "state":
 		return b.State()
 	case "audit":
-		return b.Audit()
+		nodes, err := b.Audit()
+		if err != nil {
+			return nil, err
+		}
+		return catalogObject("events", nodes), nil
 	case "book_settings_get":
 		return b.GetSettings()
 	case "book_settings_set":
@@ -324,7 +328,7 @@ func (b *Book) Invoke(name string, params json.RawMessage) (any, error) {
 		}
 		return b.SetAccountNumber(in.AccountID, in.Number)
 	case "ledger_account_role_list":
-		return b.AccountRoles(), nil
+		return catalogObject("roles", b.AccountRoles()), nil
 	case "ledger_account_role_set":
 		var in struct {
 			AccountID string      `json:"account_id"`
@@ -474,7 +478,7 @@ func (b *Book) Invoke(name string, params json.RawMessage) (any, error) {
 		}
 		return b.CreateSnapshot(in.Name)
 	case "rbac_permissions":
-		return b.Permissions(), nil
+		return catalogObject("permissions", b.Permissions()), nil
 	case "rbac_role_set":
 		var in struct {
 			Name        string       `json:"name"`
@@ -520,7 +524,7 @@ func ToolCatalog() []Tool {
 	return []Tool{
 		tool("init", "Initialize the book once. Idempotent. Creates the owner actor and defaults the book to cash until book_settings_set is called.", objectSchema(nil, nil)),
 		tool("state", "Reconstructed book state. Requires audit:read. Broad; prefer list tools for ordinary work.", objectSchema(nil, nil)),
-		tool("audit", "Append-only event history. Requires audit:read.", objectSchema(nil, nil)),
+		tool("audit", "Append-only event history as an object with an events array. Requires audit:read.", objectSchema(nil, nil)),
 		tool("book_settings_get", "Read the active accounting basis and modified-cash policy. Call this before posting.", objectSchema(nil, nil)),
 		tool("book_settings_set", "Set the book accounting basis. Magpie rejects a change after journals exist.", objectSchema([]string{"accounting_basis"}, map[string]any{
 			"accounting_basis": map[string]any{"type": "string", "enum": []string{"cash", "modified_cash", "accrual"}},
@@ -538,7 +542,7 @@ func ToolCatalog() []Tool {
 			"account_id": map[string]any{"type": "string", "description": ids},
 			"number":     map[string]any{"type": "string"},
 		})),
-		tool("ledger_account_role_list", "List allowed Magpie account roles.", objectSchema(nil, nil)),
+		tool("ledger_account_role_list", "List allowed Magpie account roles as an object with a roles array.", objectSchema(nil, nil)),
 		tool("ledger_account_role_set", "Assign a typed role to an account.", objectSchema([]string{"account_id", "role"}, map[string]any{
 			"account_id": map[string]any{"type": "string"},
 			"role":       map[string]any{"type": "string"},
@@ -634,7 +638,7 @@ func ToolCatalog() []Tool {
 			"sensitivity": map[string]any{"type": "string"},
 		})),
 		tool("snapshot_create", "Create a named local root checkpoint. This is not an off-host backup.", objectSchema([]string{"name"}, map[string]any{"name": map[string]any{"type": "string"}})),
-		tool("rbac_permissions", "List permission names the book understands.", objectSchema(nil, nil)),
+		tool("rbac_permissions", "List permission names the book understands as an object with a permissions array.", objectSchema(nil, nil)),
 		tool("rbac_role_set", "Create or replace a role.", objectSchema([]string{"name", "permissions"}, map[string]any{
 			"name":        map[string]any{"type": "string"},
 			"permissions": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
@@ -649,6 +653,15 @@ func ToolCatalog() []Tool {
 
 func tool(name, description string, schema map[string]any) Tool {
 	return Tool{Name: name, Description: description, InputSchema: schema}
+}
+
+// catalogObject wraps a list so MCP structuredContent is a JSON object.
+// Role and permission names are unchanged; only the envelope is an object.
+func catalogObject(field string, items any) map[string]any {
+	if items == nil {
+		return map[string]any{field: []any{}}
+	}
+	return map[string]any{field: items}
 }
 
 func objectSchema(required []string, props map[string]any) map[string]any {
