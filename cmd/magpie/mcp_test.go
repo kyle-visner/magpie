@@ -271,21 +271,24 @@ func assertJSONObject(t *testing.T, label string, value any) {
 
 func assertStringCatalog(t *testing.T, field string, value any, required string) {
 	t.Helper()
-	items, ok := value.([]any)
-	if !ok {
+	var names []string
+	switch items := value.(type) {
+	case []string:
+		names = items
+	case []any:
+		for _, item := range items {
+			name, _ := item.(string)
+			names = append(names, name)
+		}
+	default:
 		t.Fatalf("expected %s array, got %#v", field, value)
 	}
-	found := false
-	for _, item := range items {
-		name, _ := item.(string)
+	for _, name := range names {
 		if name == required {
-			found = true
-			break
+			return
 		}
 	}
-	if !found {
-		t.Fatalf("expected %s to include %q, got %#v", field, required, items)
-	}
+	t.Fatalf("expected %s to include %q, got %#v", field, required, names)
 }
 
 func asMap(t *testing.T, value any) map[string]any {
