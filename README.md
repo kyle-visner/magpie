@@ -15,7 +15,7 @@ API checks RBAC and accounting invariants before appending an encrypted, immutab
 [Jaybase](https://github.com/kyle-visner/jaybase). The CLI and MCP are two
 interfaces over that API.
 
-Requires Go 1.26.5 or later. Earlier Go releases include known standard-library
+Requires Go 1.26.6 or later. Earlier Go releases include known standard-library
 vulnerabilities and must not be used to build release binaries:
 
 ```sh
@@ -100,7 +100,7 @@ AGPL-3.0-or-later. See `LICENSE`.
 
 ## Build and verify
 
-Use Go 1.26.5 or later. From the repository root:
+Use Go 1.26.6 or later. From the repository root:
 
 ```sh
 go mod verify

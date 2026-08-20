@@ -10,7 +10,7 @@ readonly version="$1"
 readonly output_dir="$2"
 readonly minimum_go_major=1
 readonly minimum_go_minor=26
-readonly minimum_go_patch=5
+readonly minimum_go_patch=6
 
 if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "release version must use vMAJOR.MINOR.PATCH" >&2
@@ -24,7 +24,7 @@ go_patch="${go_patch_extra%%[^0-9]*}"
 if ((go_major < minimum_go_major ||
      (go_major == minimum_go_major && go_minor < minimum_go_minor) ||
      (go_major == minimum_go_major && go_minor == minimum_go_minor && go_patch < minimum_go_patch))); then
-  echo "Go 1.26.5 or later is required; found $(go env GOVERSION)" >&2
+  echo "Go 1.26.6 or later is required; found $(go env GOVERSION)" >&2
   exit 1
 fi
 

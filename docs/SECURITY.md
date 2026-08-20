@@ -18,7 +18,7 @@ This document records the Phase 1 controls intended to support SOC 2, PCI DSS, a
 - Remote MCP (`magpie mcp --http`) requires `MAGPIE_MCP_TOKEN` in the environment. That token is not the Jaybase token. The Magpie actor is bound at process start.
 - Hosted appends use optimistic root preconditions and stable idempotency keys, so concurrent changes and ambiguous retries cannot silently duplicate or overwrite events.
 - Hosted replay follows the authenticated, payload-explicit, paginated `/v1/events` API rather than reading Jaybase data files directly.
-- Pull requests and tagged releases run tests, race detection, vet, module verification, and pinned `govulncheck` scanning with Go 1.26.5.
+- Pull requests and tagged releases run tests, race detection, vet, module verification, and pinned `govulncheck` scanning with Go 1.26.6.
 
 ## Production Requirements Before External Deployment
 

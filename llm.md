@@ -50,7 +50,7 @@ MCP tools are the Magpie command map (`book_settings_get`, `ledger_account_list`
 
 ## Install
 
-Magpie requires Go 1.26.5 or later. Earlier Go releases must not be used to
+Magpie requires Go 1.26.6 or later. Earlier Go releases must not be used to
 build Magpie release binaries. Install it from a repository checkout:
 
 ```sh
