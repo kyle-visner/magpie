@@ -190,6 +190,9 @@ func (s *Store) CreateInvoice(ctx Context, invoice Invoice) (Invoice, string, er
 	if err != nil {
 		return Invoice{}, "", err
 	}
+	if err := ensurePostingDateOpen(st, invoice.InvoiceDate); err != nil {
+		return Invoice{}, "", err
+	}
 	if _, exists := st.Invoices[invoice.ID]; exists {
 		return Invoice{}, "", appErr(ErrConflict, "invoice already exists: %s", invoice.ID)
 	}
@@ -250,6 +253,9 @@ func (s *Store) PostInvoice(ctx Context, invoiceID string) (Invoice, string, err
 		if settings.AccountingBasis != AccountingBasisAccrual || invoice.IssuedJournalEntryID != "" {
 			return invoice, st.Root, nil
 		}
+	}
+	if err := ensurePostingDateOpen(st, invoice.InvoiceDate); err != nil {
+		return Invoice{}, "", err
 	}
 	root := st.Root
 	if settings.AccountingBasis == AccountingBasisAccrual && invoice.IssuedJournalEntryID == "" {
@@ -347,6 +353,9 @@ func (s *Store) MarkInvoicePaid(ctx Context, invoiceID string, req InvoicePaymen
 		if payment.ID == paymentID {
 			return invoice, st.Root, nil
 		}
+	}
+	if err := ensurePostingDateOpen(st, req.Date); err != nil {
+		return Invoice{}, "", err
 	}
 	paid, err := invoicePaidAmount(invoice)
 	if err != nil {
@@ -466,6 +475,9 @@ func (s *Store) ReverseInvoicePayment(ctx Context, invoiceID string, req Invoice
 	payment := invoice.Payments[paymentIndex]
 	if payment.Reversed {
 		return invoice, st.Root, nil
+	}
+	if err := ensurePostingDateOpen(st, req.Date); err != nil {
+		return Invoice{}, "", err
 	}
 	if payment.JournalEntryID == "" {
 		return Invoice{}, "", appErr(ErrValidation, "invoice payment %s has no journal entry to reverse", payment.ID)

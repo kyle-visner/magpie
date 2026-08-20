@@ -10,6 +10,14 @@ func checkedAddCents(left, right int64, description string) (int64, error) {
 	return left + right, nil
 }
 
+func checkedSubtractCents(left, right int64, description string) (int64, error) {
+	if (right > 0 && left < math.MinInt64+right) ||
+		(right < 0 && left > math.MaxInt64+right) {
+		return 0, appErr(ErrValidation, "%s exceeds the supported signed 64-bit cent range", description)
+	}
+	return left - right, nil
+}
+
 func checkedMultiplyCents(left, right int64, description string) (int64, error) {
 	if left == 0 || right == 0 {
 		return 0, nil

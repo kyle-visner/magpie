@@ -35,6 +35,17 @@ type remoteEventPage struct {
 	HasMore bool           `json:"has_more"`
 }
 
+type remoteEventPayload struct {
+	EventID string          `json:"event_id"`
+	Hash    string          `json:"hash"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type remotePayloadBatch struct {
+	Root     string               `json:"root"`
+	Payloads []remoteEventPayload `json:"payloads"`
+}
+
 // OpenRemoteStore connects Magpie to a hosted Jaybase HTTP API. The bearer
 // token is deliberately supplied separately from the URL so it never appears
 // in request paths or persisted store data.
@@ -155,17 +166,30 @@ func (b *remoteStorageBackend) AuditLog() ([]jaybase.Node, error) {
 func (b *remoteStorageBackend) readEvents(stopAt string, includePayload bool) ([]jaybase.Node, bool, error) {
 	nodes := make([]jaybase.Node, 0)
 	after := ""
+	targetRoot := strings.TrimSpace(stopAt)
+	rootBound := targetRoot != ""
 	for {
 		query := url.Values{"limit": {strconv.Itoa(remoteEventPageSize)}}
-		if includePayload {
-			query.Set("include_payload", "true")
-		}
 		if after != "" {
 			query.Set("after", after)
+		}
+		if targetRoot != "" {
+			query.Set("root", targetRoot)
 		}
 		var page remoteEventPage
 		if err := b.doJSON(http.MethodGet, "/v1/events?"+query.Encode(), nil, "", &page); err != nil {
 			return nil, false, err
+		}
+		if !rootBound {
+			targetRoot = page.Root
+			rootBound = true
+		} else if page.Root != targetRoot {
+			return nil, false, appErr(ErrValidation, "Jaybase replay root changed from %s to %s", targetRoot, page.Root)
+		}
+		if includePayload {
+			if err := b.hydrateMagpiePayloads(page.Events, targetRoot); err != nil {
+				return nil, false, err
+			}
 		}
 		for _, node := range page.Events {
 			nodes = append(nodes, node)
@@ -179,8 +203,55 @@ func (b *remoteStorageBackend) readEvents(stopAt string, includePayload bool) ([
 		if len(page.Events) == 0 {
 			return nil, false, appErr(ErrValidation, "Jaybase returned has_more without an event cursor")
 		}
-		after = page.Events[len(page.Events)-1].Hash
+		nextAfter := strings.TrimSpace(page.Events[len(page.Events)-1].Hash)
+		if nextAfter == "" || nextAfter == after {
+			return nil, false, appErr(ErrValidation, "Jaybase returned has_more without an advancing event cursor")
+		}
+		after = nextAfter
 	}
+}
+
+func (b *remoteStorageBackend) hydrateMagpiePayloads(nodes []jaybase.Node, root string) error {
+	eventIDs := make([]string, 0, len(nodes))
+	indexes := make([]int, 0, len(nodes))
+	for i, node := range nodes {
+		owned, err := classifyNodeType(node)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			continue
+		}
+		eventIDs = append(eventIDs, node.Hash)
+		indexes = append(indexes, i)
+	}
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	body, err := json.Marshal(map[string]any{"root": root, "event_ids": eventIDs})
+	if err != nil {
+		return err
+	}
+	var response remotePayloadBatch
+	if err := b.doJSON(http.MethodPost, "/v1/events/payloads", body, "", &response); err != nil {
+		return err
+	}
+	if response.Root != root {
+		return appErr(ErrValidation, "Jaybase payload response root %s does not match replay root %s", response.Root, root)
+	}
+	if len(response.Payloads) != len(eventIDs) {
+		return appErr(ErrValidation, "Jaybase returned %d payloads for %d selected events", len(response.Payloads), len(eventIDs))
+	}
+	for i, payload := range response.Payloads {
+		if payload.EventID != eventIDs[i] || payload.Hash != eventIDs[i] {
+			return appErr(ErrValidation, "Jaybase payload identity %s/%s does not match selected event %s", payload.EventID, payload.Hash, eventIDs[i])
+		}
+		if len(payload.Payload) == 0 {
+			return appErr(ErrValidation, "Jaybase selected event %s did not include its decrypted payload", eventIDs[i])
+		}
+		nodes[indexes[i]].Payload = append(json.RawMessage(nil), payload.Payload...)
+	}
+	return nil
 }
 
 func (b *remoteStorageBackend) NodePayload(node jaybase.Node) ([]byte, error) {

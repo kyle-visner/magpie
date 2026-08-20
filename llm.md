@@ -12,7 +12,8 @@ history. Humans and agents use the same domain operations. The CLI and the MCP
 server are two adapters over that API. They do not wrap each other. The domain layer enforces
 role-based permissions, accounting-basis rules, account roles, balanced
 double-entry journals, source-document workflow rules, and source-key
-idempotency before a write is appended.
+idempotency before a write is appended. It also enforces append-only period
+closes and produces root-addressed standard financial reports.
 
 Magpie does not authenticate a human, decide whether source evidence is true,
 provide accounting or tax advice, or parse provider-specific exports. The agent
@@ -97,8 +98,11 @@ Rules for hosted mode:
   transcript, or idempotency key.
 - Do not combine an explicit `--store` with `JAYBASE_URL` or `--jaybase-url`.
 - Use the lowest Jaybase credential role that can complete the task.
-- Hosted commands currently reconstruct Magpie state by replaying the complete
-  event history. Expect latency and bandwidth to grow with history size.
+- Hosted commands scan the complete event metadata chain, bounded to one
+  captured root, and retrieve decrypted payloads only for Magpie-owned events
+  through Jaybase's selective payload endpoint. Accepted foreign namespaces
+  advance the shared root without fetching their payloads. Metadata scanning
+  and selected-payload retrieval still grow with history size.
 
 Magpie's `--actor` is a domain identity, not proof of authentication. Jaybase
 authenticates the bearer token but does not prove that it belongs to the actor
@@ -174,7 +178,7 @@ command list; use this guide and the README for command-specific contracts.
 - Select accounts by their typed `role`, then use the returned account ID.
   Display names and chart numbers are not semantic contracts.
 - Never change the book's accounting basis per transaction.
-- Prefer first-class invoice and payout commands for ordinary activity.
+- Prefer first-class invoice, payout, and bank commands for ordinary activity.
 - Generic `ledger journal create` is a privileged manual adjustment or import
   path. It requires `ledger:write`, `journal:adjust`, a balanced entry, and a
   nonempty `manual_reason`.
@@ -183,6 +187,9 @@ command list; use this guide and the README for command-specific contracts.
 - Corrections preserve history. Reverse an invoice payment with
   `invoice reverse-payment`; do not attempt to edit or delete the original
   payment or journal.
+- Import institution-specific statement data only after normalizing it to the
+  provider-neutral bank JSON contracts. Do not put PII in bank external-ref
+  metadata; use opaque source-document IDs and SHA-256 content hashes.
 
 Magpie supports `cash`, `modified_cash`, and `accrual` books. Invoice posting
 differs by basis:
@@ -226,6 +233,47 @@ without payment evidence is rejected.
 `payout import-json` requires a destination bank/cash account and, when a fee is
 present, an account with `merchant_fees_expense`. It creates the payout and its
 workflow journals idempotently from external references.
+
+`bank statement import-json` creates an open statement for an
+`operating_cash`, `bank_account`, or liability `credit_card` account.
+For the first statement on an account, Magpie compares the ledger balance
+strictly before the period start and posts only the delta needed to reach the
+statement opening balance against `opening_balance_equity`, dated one day
+before the period. This uses `ledger:write`, not `journal:adjust`; later-period
+activity does not change the delta. Recovery by source key must match the exact
+date, accounts, postings, and amount.
+`bank transaction import-json` stages a row by stable external reference.
+`amount_cents` is the signed statement-balance change; positive increases the
+balance and negative decreases it. A pending transaction cannot be posted or
+paired.
+
+Use `bank transaction post --transaction-id ID --account-id ID` to classify an
+ordinary receipt, expense, refund, owner contribution, owner draw, or supported
+balance-sheet movement. It creates a workflow journal with `ledger:write` and
+does not require `journal:adjust`. Another bank/card account is not a valid
+classification; pair the two staged source rows with `bank transfer pair`.
+Pairing requires matching currency, equal amounts, opposite ledger effects,
+and different accounts, with no income or expense. If the statement periods do
+not share a safe posting date, a configured `transfer_clearing` asset account
+supports two balanced leg journals on the source and destination dates.
+
+Use `bank transaction reclassify` or `bank transaction reverse` for audited
+corrections. Both append workflow journals and preserve earlier events.
+Reversal offsets every journal contributing to the transaction's current
+classification exactly and returns the row to `staged` for a corrected repost.
+Its date defaults to and must equal the source transaction date. Repeating the
+last exact correction is idempotent; an older historical target/reason is not a
+no-op after later classification changes.
+
+Use `bank transfer reverse` to offset an incorrect pair. Both legs return to
+`staged`, while pair history retains the economic `from`/`to` direction and
+audit reason. Each pair journal is offset on its original date. Omit an explicit
+date for cross-period pairs; a supplied date must match every leg.
+
+Run `bank reconciliation preview` after all source rows are imported. Completion
+requires zero ledger difference, zero opening-plus-activity difference, and no
+unmatched, duplicate, pending, or out-of-period blockers. A completed statement
+rejects later transaction imports and corrections.
 
 For provider-specific CSV, IIF, QBXML, API, PDF, or spreadsheet data, parsing
 belongs outside Magpie. Preserve the original evidence and perform an explicit
@@ -285,6 +333,16 @@ invoice list
 payout import-json --file payout.json
 payout get --payout-id ID
 payout list
+bank statement import-json --file statement.json
+bank transaction import-json --file transaction.json
+bank transaction post --transaction-id ID --account-id ID
+bank transaction reverse --transaction-id ID --reason REASON [--date YYYY-MM-DD]
+bank transaction reclassify --transaction-id ID --account-id ID --reason REASON
+bank transaction list
+bank transfer pair --from-transaction-id ID --to-transaction-id ID
+bank transfer reverse --from-transaction-id ID --to-transaction-id ID --reason REASON [--date YYYY-MM-DD]
+bank reconciliation preview --statement-id ID
+bank reconciliation complete --statement-id ID
 rbac defaults repair
 rbac permissions
 rbac role set --name NAME --permissions p1,p2
@@ -303,8 +361,48 @@ note put --title TITLE --body-file FILE
 note get --id ID
 note list
 snapshot create --name NAME
+period close preview --through YYYY-MM-DD
+period close complete --through YYYY-MM-DD
+period reopen --through YYYY-MM-DD --reason REASON
+period close package (--through YYYY-MM-DD | --close-id ID) --output-dir DIR
+report trial-balance --as-of YYYY-MM-DD --format json|csv
+report profit-loss --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
+report balance-sheet --as-of YYYY-MM-DD --format json|csv
+report general-ledger --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
 mcp [--http ADDR]
 ```
+
+Always run close preview first and resolve every blocker. Native completed
+bank/card statements provide reconciliation evidence through their period end.
+Financial accounts with role `operating_cash`, `bank_account`, or `credit_card`
+that are reconciled outside Magpie require an external-ref metadata marker
+`reconciled_through=YYYY-MM-DD`; never advance it without source evidence. A
+completed close rejects postings dated on or before its boundary.
+Only an actor with `period:reopen` may reopen it, and the command requires an
+audit reason. Reopening does not delete the close: after corrections, complete
+the close again to create a linked revision.
+
+Current staged-work coverage is exhaustive for the domain models in this
+repository: invoices, payouts, and native bank statements and transactions.
+Open statements, staged bank transactions, and missing active bank journal
+links block close. A future bill or other staged financial model must add a
+close-preview domain checker before it is close-safe.
+
+Close packages regenerate reports from the manifest's exact pre-close Jaybase
+root and verify every SHA-256 before writing files. Retain `manifest.json` with
+all delivered JSON and CSV artifacts. Treat a hash mismatch as an integrity
+failure. The first close report window begins at the book's first journal date;
+later P&L and general-ledger windows begin the day after the previous active
+close. A correction revision has a new `package_id` but preserves
+`original_package_id`, `previous_package_id`, the original close record, and the
+audit reason.
+
+Close events and named refs are separate Jaybase operations. If a close reports
+a ref-write failure, retry a close, reopen, or later close command. Magpie first
+repairs all durable close refs deterministically and does not duplicate the
+close event. Owner and Admin have `period:close` plus `period:reopen`; Accountant
+has close only. Older stores need `rbac defaults repair` to receive these
+defaults.
 
 `state` and `audit` expose broad reconstructed or historical data and require
 `audit:read`. Give that permission only to actors that need it.
