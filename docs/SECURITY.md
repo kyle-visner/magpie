@@ -13,11 +13,12 @@ This document records the Phase 1 controls intended to support SOC 2, PCI DSS, a
 - External source references are structured and encrypted with the account payload.
 - Agent-mapped external journal entries are idempotent by source key to reduce duplicate financial records.
 - Audit history is reconstructed from the same immutable DAG used as source of truth.
-- The Phase 1 CLI has no SQL, graph-query, vector-query, or raw mutation escape hatch.
+- The Phase 1 CLI and MCP server have no SQL, graph-query, vector-query, or raw mutation escape hatch.
 - Hosted Jaybase access requires a bearer token and HTTPS outside loopback development.
+- Remote MCP (`magpie mcp --http`) requires `MAGPIE_MCP_TOKEN` in the environment. That token is not the Jaybase token. The Magpie actor is bound at process start.
 - Hosted appends use optimistic root preconditions and stable idempotency keys, so concurrent changes and ambiguous retries cannot silently duplicate or overwrite events.
 - Hosted replay follows the authenticated, payload-explicit, paginated `/v1/events` API rather than reading Jaybase data files directly.
-- Pull requests and tagged releases run tests, race detection, vet, module verification, and pinned `govulncheck` scanning with Go 1.26.5.
+- Pull requests and tagged releases run tests, race detection, vet, module verification, and pinned `govulncheck` scanning with Go 1.26.6.
 
 ## Production Requirements Before External Deployment
 

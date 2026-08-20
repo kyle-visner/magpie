@@ -53,7 +53,7 @@ func run(args []string, out io.Writer) error {
 	var store *magpie.Store
 	var err error
 	if strings.TrimSpace(*jaybaseURL) != "" {
-		store, err = magpie.OpenRemoteStore(*jaybaseURL, os.Getenv("JAYBASE_TOKEN"))
+		store, err = magpie.OpenRemoteStore(*jaybaseURL, magpie.SecretFromEnv("JAYBASE_TOKEN"))
 	} else {
 		store, err = magpie.OpenStore(*storeDir)
 	}
@@ -113,6 +113,8 @@ func run(args []string, out io.Writer) error {
 		return a.period(rest[1:], out)
 	case "report":
 		return a.report(rest[1:], out)
+	case "mcp":
+		return a.mcp(rest[1:], out)
 	default:
 		return fmt.Errorf("unknown command %q", rest[0])
 	}
@@ -1021,6 +1023,7 @@ Commands:
   report profit-loss --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
   report balance-sheet --as-of YYYY-MM-DD --format json|csv
   report general-ledger --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
+  mcp [--http ADDR]
 
 Global flags:
   --store DIR

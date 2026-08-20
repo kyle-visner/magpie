@@ -8,13 +8,14 @@
 
 ## TL;DR
 
-Magpie is an opinionated accounting CLI for humans and AI agents. It provides
+Magpie is an opinionated accounting CLI and MCP server for humans and AI agents. It provides
 one guarded path for chart-of-accounts management, double-entry journals,
-customers, invoices, payouts, notes, snapshots, and audit reads. The CLI checks
-RBAC and accounting invariants before appending an encrypted, immutable event to
-[Jaybase](https://github.com/kyle-visner/jaybase).
+customers, invoices, payouts, notes, snapshots, and audit reads. The same domain
+API checks RBAC and accounting invariants before appending an encrypted, immutable event to
+[Jaybase](https://github.com/kyle-visner/jaybase). The CLI and MCP are two
+interfaces over that API.
 
-Requires Go 1.26.5 or later. Earlier Go releases include known standard-library
+Requires Go 1.26.6 or later. Earlier Go releases include known standard-library
 vulnerabilities and must not be used to build release binaries:
 
 ```sh
@@ -77,6 +78,7 @@ AGPL-3.0-or-later. See `LICENSE`.
 ## Current Capabilities
 
 - Canonical CLI in `cmd/magpie` with local embedded and hosted Jaybase backends.
+- First-class MCP server (`magpie mcp`) over the same domain API: stdio and Streamable HTTP.
 - Append-only, SHA-256-addressed event history through Jaybase.
 - Bearer-authenticated hosted Jaybase access over HTTPS with bounded metadata-first replay, selective payload retrieval, optimistic concurrency, idempotent writes, and remote named refs.
 - AES-256-GCM encryption for stored node payloads.
@@ -98,7 +100,7 @@ AGPL-3.0-or-later. See `LICENSE`.
 
 ## Build and verify
 
-Use Go 1.26.5 or later. From the repository root:
+Use Go 1.26.6 or later. From the repository root:
 
 ```sh
 go mod verify
@@ -1122,6 +1124,7 @@ report trial-balance --as-of YYYY-MM-DD --format json|csv
 report profit-loss --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
 report balance-sheet --as-of YYYY-MM-DD --format json|csv
 report general-ledger --from YYYY-MM-DD --through YYYY-MM-DD --format json|csv
+mcp [--http ADDR]
 ```
 
 Global flags:
