@@ -18,6 +18,10 @@ const (
 	PermissionChartManage    Permission = "chart:manage"
 	PermissionPeriodClose    Permission = "period:close"
 	PermissionPeriodReopen   Permission = "period:reopen"
+	PermissionInvoiceIssue   Permission = "invoice:issue"
+	PermissionInvoiceSend    Permission = "invoice:send"
+	PermissionInvoiceVoid    Permission = "invoice:void"
+	PermissionRailCollect    Permission = "rail:collect"
 )
 
 type Role struct {
@@ -65,6 +69,8 @@ const (
 	AccountRoleOtherIncome             AccountRole = "other_income"
 	AccountRoleDefaultExpense          AccountRole = "default_expense"
 	AccountRoleMerchantFeesExpense     AccountRole = "merchant_fees_expense"
+	AccountRolePaymentProcessingFees   AccountRole = "payment_processing_fees"
+	AccountRoleProcessorClearing       AccountRole = "processor_clearing"
 	AccountRoleInterestExpense         AccountRole = "interest_expense"
 	AccountRolePayrollExpense          AccountRole = "payroll_expense"
 	AccountRoleDepreciationExpense     AccountRole = "depreciation_expense"
@@ -114,11 +120,27 @@ const (
 	SourceDocumentOpen     SourceDocumentStatus = "open"
 	SourceDocumentPaid     SourceDocumentStatus = "paid"
 	SourceDocumentVoid     SourceDocumentStatus = "void"
+
+	// Tenant invoicing statuses. imported/open remain valid so existing events
+	// replay. New issue/send/collect paths write the finer statuses.
+	InvoiceStatusDraft         SourceDocumentStatus = "draft"
+	InvoiceStatusIssued        SourceDocumentStatus = "issued"
+	InvoiceStatusSent          SourceDocumentStatus = "sent"
+	InvoiceStatusPartiallyPaid SourceDocumentStatus = "partially_paid"
+	InvoiceStatusOverdue       SourceDocumentStatus = "overdue"
+	InvoiceStatusUncollectible SourceDocumentStatus = "uncollectible"
+)
+
+const (
+	InvoiceKindInvoice    = "invoice"
+	InvoiceKindCreditMemo = "credit_memo"
 )
 
 type Customer struct {
 	ID           string              `json:"id"`
 	Name         string              `json:"name"`
+	Email        string              `json:"email,omitempty"`
+	Address      string              `json:"address,omitempty"`
 	ExternalRefs []ExternalSourceRef `json:"external_refs,omitempty"`
 	CreatedAt    time.Time           `json:"created_at"`
 	UpdatedAt    time.Time           `json:"updated_at"`
@@ -133,21 +155,68 @@ type InvoiceLineItem struct {
 	UnitAmountCents  int64  `json:"unit_amount_cents"`
 	AmountCents      int64  `json:"amount_cents"`
 	TaxAmountCents   int64  `json:"tax_amount_cents,omitempty"`
+	JobRef           string `json:"job_ref,omitempty"`
 }
 
 type InvoicePayment struct {
-	ID                     string `json:"id"`
-	Date                   string `json:"date"`
-	AmountCents            int64  `json:"amount_cents"`
-	CashAccountID          string `json:"cash_account_id"`
-	JournalEntryID         string `json:"journal_entry_id,omitempty"`
-	ExternalSource         string `json:"external_source,omitempty"`
-	ExternalID             string `json:"external_id,omitempty"`
-	PaymentEvidence        string `json:"payment_evidence,omitempty"`
-	Reversed               bool   `json:"reversed,omitempty"`
-	ReversalDate           string `json:"reversal_date,omitempty"`
-	ReversalReason         string `json:"reversal_reason,omitempty"`
-	ReversalJournalEntryID string `json:"reversal_journal_entry_id,omitempty"`
+	ID                     string              `json:"id"`
+	Date                   string              `json:"date"`
+	AmountCents            int64               `json:"amount_cents"`
+	CashAccountID          string              `json:"cash_account_id"`
+	JournalEntryID         string              `json:"journal_entry_id,omitempty"`
+	ExternalSource         string              `json:"external_source,omitempty"`
+	ExternalID             string              `json:"external_id,omitempty"`
+	PaymentEvidence        string              `json:"payment_evidence,omitempty"`
+	ExternalRefs           []ExternalSourceRef `json:"external_refs,omitempty"`
+	ManualReason           string              `json:"manual_reason,omitempty"`
+	Reversed               bool                `json:"reversed,omitempty"`
+	ReversalDate           string              `json:"reversal_date,omitempty"`
+	ReversalReason         string              `json:"reversal_reason,omitempty"`
+	ReversalJournalEntryID string              `json:"reversal_journal_entry_id,omitempty"`
+}
+
+type InvoiceBranding struct {
+	LegalName     string `json:"legal_name,omitempty"`
+	DBA           string `json:"dba,omitempty"`
+	Address       string `json:"address,omitempty"`
+	Email         string `json:"email,omitempty"`
+	Phone         string `json:"phone,omitempty"`
+	LicenseNumber string `json:"license_number,omitempty"`
+}
+
+type PaymentInstruction struct {
+	Label        string `json:"label,omitempty"`
+	BankName     string `json:"bank_name,omitempty"`
+	AccountName  string `json:"account_name,omitempty"`
+	RoutingLast4 string `json:"routing_last4,omitempty"`
+	AccountLast4 string `json:"account_last4,omitempty"`
+	Instructions string `json:"instructions,omitempty"`
+}
+
+type InvoicePaymentInstructions struct {
+	ACH   *PaymentInstruction `json:"ach,omitempty"`
+	Wire  *PaymentInstruction `json:"wire,omitempty"`
+	Check *PaymentInstruction `json:"check,omitempty"`
+}
+
+type IssuedInvoiceSnapshot struct {
+	InvoiceNumber        string                      `json:"invoice_number"`
+	CustomerID           string                      `json:"customer_id"`
+	InvoiceDate          string                      `json:"invoice_date"`
+	DueDate              string                      `json:"due_date,omitempty"`
+	Terms                string                      `json:"terms,omitempty"`
+	Currency             string                      `json:"currency"`
+	LineItems            []InvoiceLineItem           `json:"line_items"`
+	SubtotalCents        int64                       `json:"subtotal_cents"`
+	TaxAmountCents       int64                       `json:"tax_amount_cents"`
+	RetainageCents       int64                       `json:"retainage_cents,omitempty"`
+	TotalCents           int64                       `json:"total_cents"`
+	Memo                 string                      `json:"memo,omitempty"`
+	PONumber             string                      `json:"po_number,omitempty"`
+	Branding             InvoiceBranding             `json:"branding"`
+	PaymentInstructions  InvoicePaymentInstructions  `json:"payment_instructions"`
+	Kind                 string                      `json:"kind,omitempty"`
+	CreditOfInvoiceID    string                      `json:"credit_of_invoice_id,omitempty"`
 }
 
 type ExternalInvoiceImportRequest struct {
@@ -165,24 +234,43 @@ type ExternalInvoiceImportResult struct {
 }
 
 type Invoice struct {
-	ID                     string               `json:"id"`
-	InvoiceNumber          string               `json:"invoice_number"`
-	CustomerID             string               `json:"customer_id"`
-	InvoiceDate            string               `json:"invoice_date"`
-	DueDate                string               `json:"due_date,omitempty"`
-	Status                 SourceDocumentStatus `json:"status"`
-	LineItems              []InvoiceLineItem    `json:"line_items"`
-	SubtotalCents          int64                `json:"subtotal_cents"`
-	TaxAmountCents         int64                `json:"tax_amount_cents"`
-	TotalCents             int64                `json:"total_cents"`
-	ExternalRefs           []ExternalSourceRef  `json:"external_refs,omitempty"`
-	IssuedJournalEntryID   string               `json:"issued_journal_entry_id,omitempty"`
-	PaymentJournalEntryIDs []string             `json:"payment_journal_entry_ids,omitempty"`
-	Payments               []InvoicePayment     `json:"payments,omitempty"`
-	CreatedAt              time.Time            `json:"created_at"`
-	UpdatedAt              time.Time            `json:"updated_at"`
-	CreatedBy              string               `json:"created_by"`
-	UpdatedBy              string               `json:"updated_by"`
+	ID                     string                      `json:"id"`
+	InvoiceNumber          string                      `json:"invoice_number"`
+	CustomerID             string                      `json:"customer_id"`
+	InvoiceDate            string                      `json:"invoice_date"`
+	DueDate                string                      `json:"due_date,omitempty"`
+	Terms                  string                      `json:"terms,omitempty"`
+	Currency               string                      `json:"currency,omitempty"`
+	Status                 SourceDocumentStatus        `json:"status"`
+	Kind                   string                      `json:"kind,omitempty"`
+	CreditOfInvoiceID      string                      `json:"credit_of_invoice_id,omitempty"`
+	LineItems              []InvoiceLineItem           `json:"line_items"`
+	SubtotalCents          int64                       `json:"subtotal_cents"`
+	TaxAmountCents         int64                       `json:"tax_amount_cents"`
+	RetainageCents         int64                       `json:"retainage_cents,omitempty"`
+	TotalCents             int64                       `json:"total_cents"`
+	AmountPaidCents        int64                       `json:"amount_paid_cents"`
+	AmountDueCents         int64                       `json:"amount_due_cents"`
+	Memo                   string                      `json:"memo,omitempty"`
+	PONumber               string                      `json:"po_number,omitempty"`
+	Branding               InvoiceBranding             `json:"branding,omitempty"`
+	PaymentInstructions    InvoicePaymentInstructions  `json:"payment_instructions,omitempty"`
+	PublicTokenHash        string                      `json:"public_token_hash,omitempty"`
+	IssuedSnapshot         *IssuedInvoiceSnapshot      `json:"issued_snapshot,omitempty"`
+	IssuedAt               time.Time                   `json:"issued_at,omitempty"`
+	SentAt                 time.Time                   `json:"sent_at,omitempty"`
+	SentTo                 string                      `json:"sent_to,omitempty"`
+	VoidReason             string                      `json:"void_reason,omitempty"`
+	VoidedAt               time.Time                   `json:"voided_at,omitempty"`
+	RemindedAt             time.Time                   `json:"reminded_at,omitempty"`
+	ExternalRefs           []ExternalSourceRef         `json:"external_refs,omitempty"`
+	IssuedJournalEntryID   string                      `json:"issued_journal_entry_id,omitempty"`
+	PaymentJournalEntryIDs []string                    `json:"payment_journal_entry_ids,omitempty"`
+	Payments               []InvoicePayment            `json:"payments,omitempty"`
+	CreatedAt              time.Time                   `json:"created_at"`
+	UpdatedAt              time.Time                   `json:"updated_at"`
+	CreatedBy              string                      `json:"created_by"`
+	UpdatedBy              string                      `json:"updated_by"`
 }
 
 type Payout struct {

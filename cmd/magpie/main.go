@@ -99,6 +99,8 @@ func run(args []string, out io.Writer) error {
 		return a.customer(rest[1:], out)
 	case "invoice":
 		return a.invoice(rest[1:], out)
+	case "credit-memo":
+		return a.creditMemo(rest[1:], out)
 	case "payout":
 		return a.payout(rest[1:], out)
 	case "bank":
@@ -541,6 +543,92 @@ func (a app) invoice(args []string, out io.Writer) error {
 			return err
 		}
 		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
+	case "issue":
+		fs := newFlagSet("invoice issue")
+		invoiceID := fs.String("invoice-id", "", "Magpie invoice id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		invoice, root, err := a.store.IssueInvoice(a.ctx, *invoiceID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
+	case "send":
+		fs := newFlagSet("invoice send")
+		invoiceID := fs.String("invoice-id", "", "Magpie invoice id")
+		to := fs.String("to", "", "recipient email")
+		tenant := fs.String("tenant", "", "public tenant slug")
+		publicBase := fs.String("public-base-url", "", "public invoice base URL")
+		from := fs.String("from", "", "from address")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, root, err := a.store.SendInvoice(a.ctx, *invoiceID, magpie.InvoiceSendRequest{To: *to}, magpie.InvoicePublicOptions{
+			Tenant:        *tenant,
+			PublicBaseURL: *publicBase,
+			FromAddress:   *from,
+		})
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "send": result})
+	case "public-link":
+		fs := newFlagSet("invoice public-link")
+		invoiceID := fs.String("invoice-id", "", "Magpie invoice id")
+		tenant := fs.String("tenant", "", "public tenant slug")
+		publicBase := fs.String("public-base-url", "", "public invoice base URL")
+		rotate := fs.Bool("rotate", false, "rotate the public token")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		link, _, err := a.store.PublicLink(a.ctx, *invoiceID, magpie.InvoicePublicOptions{Tenant: *tenant, PublicBaseURL: *publicBase}, *rotate)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, link)
+	case "public-serve":
+		return a.invoicePublicServe(args[1:], out)
+	case "void":
+		fs := newFlagSet("invoice void")
+		invoiceID := fs.String("invoice-id", "", "Magpie invoice id")
+		reason := fs.String("reason", "", "void reason")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		invoice, root, err := a.store.VoidInvoice(a.ctx, *invoiceID, *reason)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": invoice})
+	case "remind":
+		fs := newFlagSet("invoice remind")
+		invoiceID := fs.String("invoice-id", "", "Magpie invoice id")
+		tenant := fs.String("tenant", "", "public tenant slug")
+		publicBase := fs.String("public-base-url", "", "public invoice base URL")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, root, err := a.store.RemindInvoice(a.ctx, *invoiceID, magpie.InvoicePublicOptions{Tenant: *tenant, PublicBaseURL: *publicBase})
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "remind": result})
+	case "update-json":
+		fs := newFlagSet("invoice update-json")
+		file := fs.String("file", "", "JSON file with a draft invoice; '-' reads stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var invoice magpie.Invoice
+		if err := readJSONFile(*file, &invoice); err != nil {
+			return err
+		}
+		updated, root, err := a.store.UpdateDraftInvoice(a.ctx, invoice)
+		if err != nil {
+			return err
+		}
+		return writeJSON(out, map[string]any{"root": root, "invoice": updated})
 	case "mark-paid":
 		fs := newFlagSet("invoice mark-paid")
 		invoiceID := fs.String("invoice-id", "", "Magpie invoice id")
@@ -550,8 +638,16 @@ func (a app) invoice(args []string, out io.Writer) error {
 		externalSource := fs.String("external-source", "", "external payment source")
 		externalID := fs.String("external-id", "", "external payment id")
 		paymentEvidence := fs.String("payment-evidence", "", "payment evidence provenance")
+		manualReason := fs.String("manual-reason", "", "required when no external_refs")
+		externalRefsFile := fs.String("external-refs-file", "", "JSON array of external_refs")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
+		}
+		var refs []magpie.ExternalSourceRef
+		if strings.TrimSpace(*externalRefsFile) != "" {
+			if err := readJSONFile(*externalRefsFile, &refs); err != nil {
+				return err
+			}
 		}
 		invoice, root, err := a.store.MarkInvoicePaid(a.ctx, *invoiceID, magpie.InvoicePaymentRequest{
 			Date:            *date,
@@ -560,6 +656,8 @@ func (a app) invoice(args []string, out io.Writer) error {
 			ExternalSource:  *externalSource,
 			ExternalID:      *externalID,
 			PaymentEvidence: *paymentEvidence,
+			ExternalRefs:    refs,
+			ManualReason:    *manualReason,
 		})
 		if err != nil {
 			return err
@@ -608,6 +706,43 @@ func (a app) invoice(args []string, out io.Writer) error {
 	default:
 		return fmt.Errorf("unknown invoice command %q", args[0])
 	}
+}
+
+func (a app) creditMemo(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("credit-memo command required")
+	}
+	if args[0] != "create-json" {
+		return fmt.Errorf("unknown credit-memo command %q", args[0])
+	}
+	fs := newFlagSet("credit-memo create-json")
+	file := fs.String("file", "", "JSON file with a credit memo invoice; '-' reads stdin")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	var invoice magpie.Invoice
+	if err := readJSONFile(*file, &invoice); err != nil {
+		return err
+	}
+	created, root, err := a.store.CreateCreditMemo(a.ctx, invoice)
+	if err != nil {
+		return err
+	}
+	return writeJSON(out, map[string]any{"root": root, "invoice": created})
+}
+
+func (a app) invoicePublicServe(args []string, out io.Writer) error {
+	fs := newFlagSet("invoice public-serve")
+	listen := fs.String("listen", "127.0.0.1:8088", "listen address")
+	tenant := fs.String("tenant", "", "required tenant slug; other slugs 404")
+	payBase := fs.String("pay-base-url", "", "rail checkout base URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*tenant) == "" {
+		return fmt.Errorf("--tenant is required")
+	}
+	return servePublicInvoices(a.store, *listen, *tenant, *payBase, out)
 }
 
 func (a app) book(args []string, out io.Writer) error {
@@ -979,12 +1114,20 @@ Commands:
   customer get --customer-id ID
   customer list
   invoice create-json --file invoice.json
+  invoice update-json --file invoice.json
   invoice import-json --file external-invoice.json
   invoice post --invoice-id ID
-  invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
+  invoice issue --invoice-id ID
+  invoice send --invoice-id ID [--to EMAIL]
+  invoice public-link --invoice-id ID [--tenant SLUG] [--rotate]
+  invoice public-serve --listen ADDR --tenant SLUG [--pay-base-url URL]
+  invoice void --invoice-id ID --reason TEXT
+  invoice remind --invoice-id ID
+  invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N [--manual-reason TEXT|--external-refs-file FILE]
   invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
   invoice get --invoice-id ID
   invoice list
+  credit-memo create-json --file credit-memo.json
   payout import-json --file payout.json
   payout get --payout-id ID
   payout list
