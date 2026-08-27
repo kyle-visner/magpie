@@ -510,6 +510,7 @@ func TestCLIInvoiceWorkflowCreatesWorkflowJournal(t *testing.T) {
 		"--cash-account-id", cashID,
 		"--paid-date", "2026-06-15",
 		"--amount-cents", "125000",
+		"--manual-reason", "CLI test payment",
 	}, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -816,6 +817,77 @@ func TestCLIPayoutImportCreatesWorkflowJournals(t *testing.T) {
 	}
 	if !workflows["payout.receive"] || !workflows["payout.fee"] {
 		t.Fatalf("expected receive and fee workflows, got %#v", workflows)
+	}
+}
+
+func TestCLIIssuesInvoiceAndRejectsMarkPaidWithoutEvidence(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"--store", dir, "init"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "ledger", "account", "create", "--number", "1010", "--name", "Operating Bank", "--type", "asset", "--role", "operating_cash"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	cashID := extractNestedString(t, out.Bytes(), "account", "id")
+	out.Reset()
+	if err := run([]string{"--store", dir, "ledger", "account", "create", "--number", "4000", "--name", "Service Revenue", "--type", "revenue", "--role", "default_service_revenue"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	revenueID := extractNestedString(t, out.Bytes(), "account", "id")
+	customerPath := filepath.Join(dir, "customer.json")
+	if err := os.WriteFile(customerPath, []byte(`{"name":"Acme Co","email":"ap@acme.test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "customer", "create-json", "--file", customerPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	customerID := extractNestedString(t, out.Bytes(), "customer", "id")
+	invoicePath := filepath.Join(dir, "invoice.json")
+	if err := os.WriteFile(invoicePath, []byte(`{
+		"invoice_number":"INV-ISSUE-1",
+		"customer_id":"`+customerID+`",
+		"invoice_date":"2026-08-27",
+		"status":"draft",
+		"line_items":[{"description":"Work","revenue_account_id":"`+revenueID+`","quantity":1,"unit_amount_cents":1000,"amount_cents":1000}],
+		"subtotal_cents":1000,
+		"total_cents":1000
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "invoice", "create-json", "--file", invoicePath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	invoiceID := extractNestedString(t, out.Bytes(), "invoice", "id")
+	out.Reset()
+	if err := run([]string{"--store", dir, "invoice", "issue", "--invoice-id", invoiceID}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"issued"`) {
+		t.Fatalf("expected issued status, got %s", out.String())
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "invoice", "mark-paid", "--invoice-id", invoiceID, "--cash-account-id", cashID, "--paid-date", "2026-08-28", "--amount-cents", "1000"}, &out); err == nil {
+		t.Fatal("expected mark-paid without evidence to fail")
+	}
+	journalPath := filepath.Join(dir, "manual.json")
+	if err := os.WriteFile(journalPath, []byte(`{
+		"date":"2026-08-28",
+		"memo":"manual",
+		"manual_reason":"should be denied",
+		"postings":[
+			{"account_id":"`+cashID+`","debit_cents":1000},
+			{"account_id":"`+revenueID+`","credit_cents":1000}
+		]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"--store", dir, "--actor", "rail-webhook", "ledger", "journal", "create", "--file", journalPath}, &out); err == nil {
+		t.Fatal("expected rail-webhook to be denied manual journals")
 	}
 }
 

@@ -25,7 +25,8 @@ func initEvent() eventEnvelope {
 	return wrapEvent("init", initPayload{
 		Roles: roles,
 		Users: map[string]User{
-			"owner": {ID: "owner", Role: "Owner"},
+			"owner":        {ID: "owner", Role: "Owner"},
+			"rail-webhook": {ID: "rail-webhook", Role: "Rail Webhook"},
 		},
 		Settings: DefaultBookSettings(),
 	})
@@ -40,6 +41,7 @@ func defaultRoles() map[string]Role {
 				PermissionRBACManage, PermissionSnapshot, PermissionAuditRead,
 				PermissionAdminRecover, PermissionSettingsManage, PermissionJournalAdjust,
 				PermissionChartManage, PermissionPeriodClose, PermissionPeriodReopen,
+				PermissionInvoiceIssue, PermissionInvoiceSend, PermissionInvoiceVoid, PermissionRailCollect,
 			},
 		},
 		"Admin": {
@@ -49,6 +51,7 @@ func defaultRoles() map[string]Role {
 				PermissionRBACManage, PermissionSnapshot, PermissionAuditRead, PermissionSettingsManage,
 				PermissionJournalAdjust, PermissionChartManage,
 				PermissionPeriodClose, PermissionPeriodReopen,
+				PermissionInvoiceIssue, PermissionInvoiceSend, PermissionInvoiceVoid, PermissionRailCollect,
 			},
 		},
 		"Accountant": {
@@ -56,15 +59,20 @@ func defaultRoles() map[string]Role {
 			Permissions: []Permission{
 				PermissionLedgerRead, PermissionLedgerWrite, PermissionNotesRead, PermissionAuditRead,
 				PermissionPeriodClose,
+				PermissionInvoiceIssue, PermissionInvoiceSend, PermissionInvoiceVoid,
 			},
 		},
 		"Operations": {
-			Name:        "Operations",
-			Permissions: []Permission{PermissionNotesRead, PermissionNotesWrite},
+			Name: "Operations",
+			Permissions: []Permission{PermissionNotesRead, PermissionNotesWrite, PermissionInvoiceSend, PermissionRailCollect},
 		},
 		"Sales Rep": {
-			Name:        "Sales Rep",
-			Permissions: []Permission{PermissionNotesRead, PermissionNotesWrite},
+			Name: "Sales Rep",
+			Permissions: []Permission{PermissionNotesRead, PermissionNotesWrite, PermissionLedgerRead, PermissionLedgerWrite, PermissionInvoiceIssue, PermissionInvoiceSend},
+		},
+		"Rail Webhook": {
+			Name:        "Rail Webhook",
+			Permissions: []Permission{PermissionLedgerRead, PermissionLedgerWrite},
 		},
 	}
 }
@@ -177,6 +185,8 @@ func PermissionNames() []string {
 		string(PermissionSnapshot), string(PermissionAuditRead), string(PermissionAdminRecover),
 		string(PermissionSettingsManage), string(PermissionJournalAdjust), string(PermissionChartManage),
 		string(PermissionPeriodClose), string(PermissionPeriodReopen),
+		string(PermissionInvoiceIssue), string(PermissionInvoiceSend),
+		string(PermissionInvoiceVoid), string(PermissionRailCollect),
 	}
 	sort.Strings(perms)
 	return perms

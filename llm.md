@@ -225,6 +225,37 @@ For each import or posting:
     external reference or source key; never invent a new identity to force a
     duplicate write.
 
+For tenant-issued invoices prefer:
+
+1. `invoice create-json` (status `draft` or omitted `imported`)
+2. `invoice issue` (freezes the issued snapshot and posts accrual journals)
+3. `invoice send` (records `sent`, returns the public link, attaches the PDF when mail is configured)
+4. `rail collect --method checkout` on the **tenant** Stripe account
+
+Never mark paid without `external_refs` or `manual_reason`. Never edit an issued
+invoice in place. Void plus `credit-memo create-json` is the correction path.
+Never edit `.magpie/` or raw Jaybase nodes. Snapshot before the first live
+webhook test.
+
+Tenant-facing copy: “Future Perfect issues and tracks your invoices. Your
+customer pays you — card through your Stripe, or ACH/wire to your bank. We
+never take the payment. Your books update when it clears.”
+
+The platform is software + orchestration. The tenant is merchant of record.
+Customers pay the tenant. Magpie never calls Stripe. `cmd/rail` creates Checkout
+Sessions / Payment Links with `Stripe-Account: acct_…` (direct charges only).
+Do not use the Stripe Invoicing product or destination charges. Do not hold or
+forward customer funds. Stripe processing fees, when known from a balance
+transaction, post through the existing `payout import-json` fee path
+(`merchant_fees_expense` or `payment_processing_fees`). Do not invent a second
+fee journal.
+
+`rail collect` refuses unless the book has `operating_cash` or `bank_account`,
+a fee role, accrual `accounts_receivable` when required, a default revenue
+role, and a Stripe/Nango connection for that volume. Secrets stay in rail env /
+Nango, never in invoice JSON beyond `external_refs`. Public tokens are
+high-entropy and stored as `public_token_hash` only.
+
 `invoice import-json` upserts the customer by external reference, creates or
 reuses the invoice by external reference, optionally posts it, and records a
 payment only when payment data and evidence are supplied. A source marked paid
@@ -298,9 +329,14 @@ magpie --store /absolute/path/to/book.magpie --actor owner \
   rbac user set --id invoice-agent --role "Invoice Agent"
 ```
 
-Default roles are `Owner`, `Admin`, `Accountant`, `Operations`, and `Sales Rep`.
-Read their actual permissions from reconstructed state rather than relying on
-the role name. Stores created by older versions may use:
+Default roles are `Owner`, `Admin`, `Accountant`, `Operations`, `Sales Rep`,
+and `Rail Webhook`. New books also create the `rail-webhook` actor. Read actual
+permissions from reconstructed state rather than relying on the role name.
+Finer invoice permissions are `invoice:issue`, `invoice:send`, `invoice:void`,
+and `rail:collect`. They are separate from `ledger:write` mark-paid.
+`rail-webhook` may only `invoice mark-paid` and `payout import-json`. It cannot
+`ledger journal create` or change book settings. Stores created by older
+versions may use:
 
 ```sh
 magpie --store /absolute/path/to/book.magpie --actor owner rbac defaults repair
@@ -324,12 +360,20 @@ customer create-json --file customer.json
 customer get --customer-id ID
 customer list
 invoice create-json --file invoice.json
+invoice update-json --file invoice.json
 invoice import-json --file external-invoice.json
 invoice post --invoice-id ID
+invoice issue --invoice-id ID
+invoice send --invoice-id ID [--to EMAIL]
+invoice public-link --invoice-id ID [--tenant SLUG] [--rotate]
+invoice public-serve --listen ADDR --tenant SLUG [--pay-base-url URL]
+invoice void --invoice-id ID --reason TEXT
+invoice remind --invoice-id ID
 invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
 invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
 invoice get --invoice-id ID
 invoice list
+credit-memo create-json --file credit-memo.json
 payout import-json --file payout.json
 payout get --payout-id ID
 payout list

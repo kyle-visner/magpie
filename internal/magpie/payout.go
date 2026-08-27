@@ -187,8 +187,8 @@ func normalizePayout(st State, payout Payout) (Payout, error) {
 		if !ok {
 			return Payout{}, appErr(ErrValidation, "payout fee expense account %s not found", payout.FeeExpenseAccountID)
 		}
-		if fee.Role != AccountRoleMerchantFeesExpense {
-			return Payout{}, appErr(ErrValidation, "payout fee expense account must have role %q", AccountRoleMerchantFeesExpense)
+		if fee.Role != AccountRoleMerchantFeesExpense && fee.Role != AccountRolePaymentProcessingFees {
+			return Payout{}, appErr(ErrValidation, "payout fee expense account must have role %q or %q", AccountRoleMerchantFeesExpense, AccountRolePaymentProcessingFees)
 		}
 	} else {
 		payout.FeeExpenseAccountID = ""

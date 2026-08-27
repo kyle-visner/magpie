@@ -876,6 +876,7 @@ func TestAccrualInvoicePostAndPaymentUseAccountsReceivable(t *testing.T) {
 		Date:          "2026-06-15",
 		AmountCents:   108500,
 		CashAccountID: cash.ID,
+		ManualReason:  "test fixture payment",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -926,6 +927,7 @@ func TestInvoicePaymentReversalCreatesOffsettingWorkflowJournal(t *testing.T) {
 		Date:          "2026-06-15",
 		AmountCents:   108500,
 		CashAccountID: cash.ID,
+		ManualReason:  "test fixture payment",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1017,6 +1019,7 @@ func TestModifiedCashInvoicePaidTracksTaxWithoutAccountsReceivable(t *testing.T)
 		Date:          "2026-06-15",
 		AmountCents:   108500,
 		CashAccountID: cash.ID,
+		ManualReason:  "test fixture payment",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1085,6 +1088,7 @@ func TestBookkeepingAgentCanUseInvoiceWorkflowButNotManualJournal(t *testing.T) 
 		Date:          "2026-06-15",
 		AmountCents:   100000,
 		CashAccountID: cash.ID,
+		ManualReason:  "test fixture payment",
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -115,6 +115,7 @@ func TestBDDCLIAccrualInvoiceFlowReplaysIntoLedger(t *testing.T) {
 			"--cash-account-id", cashID,
 			"--paid-date", "2026-07-20",
 			"--amount-cents", "100000",
+			"--manual-reason", "BDD test payment",
 		), "invoice")
 		if stringField(t, paid, "status") != "paid" {
 			t.Fatalf("unexpected paid invoice: %#v", paid)

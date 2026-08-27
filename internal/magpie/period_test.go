@@ -215,7 +215,7 @@ func TestClosePreviewScansPaymentDatesOnFutureDatedInvoice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invoice, _, err = s.MarkInvoicePaid(owner, invoice.ID, InvoicePaymentRequest{Date: "2026-06-15", AmountCents: 100, CashAccountID: bank.ID})
+	invoice, _, err = s.MarkInvoicePaid(owner, invoice.ID, InvoicePaymentRequest{Date: "2026-06-15", AmountCents: 100, CashAccountID: bank.ID, ManualReason: "test fixture payment"})
 	if err != nil {
 		t.Fatalf("domain no longer permits payment before invoice date: %v", err)
 	}
@@ -479,9 +479,9 @@ func TestClosedPeriodPublicPaymentReversalAndPayoutPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = s.MarkInvoicePaid(owner, invoice.ID, InvoicePaymentRequest{Date: "2026-05-31", AmountCents: 100, CashAccountID: bank.ID})
+	_, _, err = s.MarkInvoicePaid(owner, invoice.ID, InvoicePaymentRequest{Date: "2026-05-31", AmountCents: 100, CashAccountID: bank.ID, ManualReason: "test fixture payment"})
 	assertClosedPeriodError(t, err)
-	invoice, _, err = s.MarkInvoicePaid(owner, invoice.ID, InvoicePaymentRequest{Date: "2026-06-02", AmountCents: 100, CashAccountID: bank.ID})
+	invoice, _, err = s.MarkInvoicePaid(owner, invoice.ID, InvoicePaymentRequest{Date: "2026-06-02", AmountCents: 100, CashAccountID: bank.ID, ManualReason: "test fixture payment"})
 	if err != nil {
 		t.Fatal(err)
 	}

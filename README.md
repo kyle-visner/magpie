@@ -202,7 +202,9 @@ Operational rules for agents:
 - Read `book settings get` before posting financial activity.
 - Use the active `accounting_basis` for the whole book; do not choose cash, modified cash, or accrual per transaction.
 - Use account roles rather than account names or numbers when deciding what an account means.
-- Use `invoice create-json`, `invoice post`, and `invoice mark-paid` for customer invoice activity.
+- Use `invoice create-json` → `invoice issue` → `invoice send` → `rail collect` for tenant invoicing. `invoice post` remains for imported source documents.
+- Never mark an invoice paid without `external_refs` or `manual_reason`.
+- Magpie never calls Stripe. Payment rails live in `cmd/rail`. Customers pay the tenant. The platform is never merchant of record.
 - Do not use generic `ledger journal create` for ordinary operating activity. It is a privileged manual adjustment/import path.
 - Use `note put --body-file FILE` for long note bodies to avoid shell quoting issues.
 - Create a `snapshot create --name NAME` before large agent workflows.
@@ -249,8 +251,9 @@ Built-in roles:
 - `Owner`: full Phase 1 access.
 - `Admin`: broad operational access except recovery.
 - `Accountant`: ledger, notes read, and audit read.
-- `Operations`: notes read/write only.
-- `Sales Rep`: notes read/write only.
+- `Operations`: notes plus `invoice:send` and `rail:collect`.
+- `Sales Rep`: notes plus invoice issue/send and ledger read/write.
+- `Rail Webhook`: `ledger:read` and `ledger:write` only (may `invoice mark-paid` and `payout import-json`; cannot create manual journals or change book settings). Init creates the `rail-webhook` actor.
 
 Stores initialized before new built-in permissions were added can repair default roles without changing custom roles or users:
 
@@ -1067,6 +1070,40 @@ Reports can also be produced independently:
 ./magpie --store .magpie --actor owner report general-ledger --from 2026-06-01 --through 2026-06-30 --format csv
 ```
 
+## Tenant invoicing
+
+Magpie + one Jaybase volume is the invoicing system of record for one tenant
+legal entity. Future Perfect issues and tracks invoices. The customer pays the
+tenant — card through the tenant's Stripe, or ACH/wire to the tenant's bank.
+The platform never takes the payment. Books update when it clears.
+
+Preferred agent path:
+
+```text
+invoice create-json → invoice issue → invoice send → rail collect
+```
+
+Issued snapshots are immutable. Correct with `invoice void` plus
+`credit-memo create-json`. `invoice mark-paid` requires `external_refs` or
+`manual_reason`. Stripe Checkout and webhooks live in `cmd/rail`; Magpie never
+imports the Stripe SDK. Direct charges only. No Stripe Invoicing product, no
+destination charges, no platform merchant-of-record.
+
+`invoice public-serve --tenant SLUG` hosts `GET /i/:tenant/:token` (HTML + PDF).
+Unknown or cross-tenant tokens 404. Voided invoices render void and disable Pay.
+
+```text
+rail collect --invoice-id ID --method checkout|payment_link|manual
+rail inbox
+rail sync --since DATE
+rail serve --listen ADDR
+```
+
+`rail collect` refuses when cash/bank, fee, accrual AR, or the Stripe connection
+is missing. Hard-code `RAIL_STRIPE_ACCOUNT` (default `acct_test_connected`) until
+Nango self-serve lands. Webhook actor `rail-webhook` may only mark invoices paid
+and import payouts.
+
 ## Command Reference
 
 ```text
@@ -1079,12 +1116,20 @@ customer create-json --file customer.json
 customer get --customer-id ID
 customer list
 invoice create-json --file invoice.json
+invoice update-json --file invoice.json
 invoice import-json --file external-invoice.json
 invoice post --invoice-id ID
-invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N
+invoice issue --invoice-id ID
+invoice send --invoice-id ID [--to EMAIL]
+invoice public-link --invoice-id ID [--tenant SLUG] [--rotate]
+invoice public-serve --listen ADDR --tenant SLUG [--pay-base-url URL]
+invoice void --invoice-id ID --reason TEXT
+invoice remind --invoice-id ID
+invoice mark-paid --invoice-id ID --cash-account-id ID --paid-date YYYY-MM-DD --amount-cents N [--manual-reason TEXT|--external-refs-file FILE]
 invoice reverse-payment --invoice-id ID --payment-id ID --reversal-date YYYY-MM-DD --reason REASON
 invoice get --invoice-id ID
 invoice list
+credit-memo create-json --file credit-memo.json
 payout import-json --file payout.json
 payout get --payout-id ID
 payout list

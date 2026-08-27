@@ -19,12 +19,49 @@ type invoiceUpdatePayload struct {
 }
 
 type InvoicePaymentRequest struct {
-	Date            string `json:"date"`
-	AmountCents     int64  `json:"amount_cents"`
-	CashAccountID   string `json:"cash_account_id"`
-	ExternalSource  string `json:"external_source,omitempty"`
-	ExternalID      string `json:"external_id,omitempty"`
-	PaymentEvidence string `json:"payment_evidence,omitempty"`
+	Date            string              `json:"date"`
+	PaidDate        string              `json:"paid_date,omitempty"`
+	AmountCents     int64               `json:"amount_cents"`
+	CashAccountID   string              `json:"cash_account_id"`
+	ExternalSource  string              `json:"external_source,omitempty"`
+	ExternalID      string              `json:"external_id,omitempty"`
+	PaymentEvidence string              `json:"payment_evidence,omitempty"`
+	ExternalRefs    []ExternalSourceRef `json:"external_refs,omitempty"`
+	ManualReason    string              `json:"manual_reason,omitempty"`
+}
+
+type InvoiceSendRequest struct {
+	To string `json:"to,omitempty"`
+}
+
+type InvoiceSendResult struct {
+	Invoice   Invoice `json:"invoice"`
+	To        string  `json:"to"`
+	PublicURL string  `json:"public_url"`
+	Subject   string  `json:"subject"`
+	Body      string  `json:"body"`
+	Sent      bool    `json:"sent"`
+}
+
+type InvoicePublicLink struct {
+	InvoiceID string `json:"invoice_id"`
+	Tenant    string `json:"tenant"`
+	Token     string `json:"token"`
+	URL       string `json:"url"`
+	Rotated   bool   `json:"rotated,omitempty"`
+}
+
+type InvoiceVoidRequest struct {
+	Reason string `json:"reason"`
+}
+
+type OutboundEmail struct {
+	From        string
+	To          string
+	Subject     string
+	Body        string
+	PDFFilename string
+	PDF         []byte
 }
 
 type InvoicePaymentReversalRequest struct {
@@ -69,7 +106,7 @@ func (s *Store) GetInvoice(ctx Context, invoiceID string) (Invoice, error) {
 	if !ok {
 		return Invoice{}, appErr(ErrNotFound, "invoice %s not found", invoiceID)
 	}
-	return invoice, nil
+	return enrichInvoice(invoice, s.now()), nil
 }
 
 func (s *Store) UpsertCustomer(ctx Context, customer Customer) (Customer, string, error) {
@@ -81,6 +118,8 @@ func (s *Store) UpsertCustomer(ctx Context, customer Customer) (Customer, string
 		return Customer{}, "", err
 	}
 	customer.Name = strings.TrimSpace(customer.Name)
+	customer.Email = strings.TrimSpace(customer.Email)
+	customer.Address = strings.TrimSpace(customer.Address)
 	if customer.Name == "" {
 		return Customer{}, "", appErr(ErrValidation, "customer name is required")
 	}
@@ -100,7 +139,10 @@ func (s *Store) UpsertCustomer(ctx Context, customer Customer) (Customer, string
 	}
 	existing, exists := st.Customers[customer.ID]
 	if exists {
-		if existing.Name == customer.Name && externalRefsEqual(existing.ExternalRefs, customer.ExternalRefs) {
+		if existing.Name == customer.Name &&
+			existing.Email == customer.Email &&
+			existing.Address == customer.Address &&
+			externalRefsEqual(existing.ExternalRefs, customer.ExternalRefs) {
 			return existing, st.Root, nil
 		}
 		customer.CreatedAt = existing.CreatedAt
@@ -159,7 +201,7 @@ func (s *Store) ImportExternalInvoice(ctx Context, req ExternalInvoiceImportRequ
 	}
 
 	result := ExternalInvoiceImportResult{Customer: customer, Invoice: invoice}
-	if req.Post || intendedStatus == SourceDocumentOpen || intendedStatus == SourceDocumentPaid {
+	if req.Post || intendedStatus == SourceDocumentOpen || intendedStatus == SourceDocumentPaid || intendedStatus == InvoiceStatusIssued || intendedStatus == InvoiceStatusSent {
 		invoice, root, err = s.PostInvoice(ctx, invoice.ID)
 		if err != nil {
 			return ExternalInvoiceImportResult{}, "", err
@@ -205,7 +247,7 @@ func (s *Store) CreateInvoice(ctx Context, invoice Invoice) (Invoice, string, er
 	invoice.CreatedBy = ctx.Actor
 	invoice.UpdatedBy = ctx.Actor
 	hash, err := s.appendEventAt(ctx, "invoice", invoice.ID, "invoice create", wrapEvent("invoice.create", invoiceCreatePayload{Invoice: invoice}), st.Root)
-	return invoice, hash, err
+	return enrichInvoice(invoice, now), hash, err
 }
 
 func (s *Store) findOrCreateImportedInvoice(ctx Context, invoice Invoice) (Invoice, string, error) {
@@ -248,10 +290,15 @@ func (s *Store) PostInvoice(ctx Context, invoiceID string) (Invoice, string, err
 	if invoice.Status == SourceDocumentVoid {
 		return Invoice{}, "", appErr(ErrValidation, "void invoice cannot be posted")
 	}
+	if invoice.Kind == InvoiceKindCreditMemo && invoice.CreditOfInvoiceID != "" {
+		if _, ok := st.Invoices[invoice.CreditOfInvoiceID]; !ok {
+			return Invoice{}, "", appErr(ErrValidation, "credit memo references unknown invoice %s", invoice.CreditOfInvoiceID)
+		}
+	}
 	settings := st.effectiveSettings()
-	if invoice.Status != SourceDocumentImported {
+	if !invoiceIsDraft(invoice.Status) {
 		if settings.AccountingBasis != AccountingBasisAccrual || invoice.IssuedJournalEntryID != "" {
-			return invoice, st.Root, nil
+			return enrichInvoice(invoice, s.now()), st.Root, nil
 		}
 	}
 	if err := ensurePostingDateOpen(st, invoice.InvoiceDate); err != nil {
@@ -259,18 +306,9 @@ func (s *Store) PostInvoice(ctx Context, invoiceID string) (Invoice, string, err
 	}
 	root := st.Root
 	if settings.AccountingBasis == AccountingBasisAccrual && invoice.IssuedJournalEntryID == "" {
-		ar, err := accountIDByRole(st, AccountRoleAccountsReceivable)
+		postings, err := invoiceIssueJournalPostings(st, invoice)
 		if err != nil {
 			return Invoice{}, "", err
-		}
-		postings := []Posting{{AccountID: ar, Debit: invoice.TotalCents, Memo: "Invoice issued"}}
-		postings = append(postings, invoiceRevenuePostings(invoice)...)
-		if invoice.TaxAmountCents > 0 {
-			tax, err := accountIDByRole(st, AccountRoleSalesTaxPayable)
-			if err != nil {
-				return Invoice{}, "", err
-			}
-			postings = append(postings, Posting{AccountID: tax, Credit: invoice.TaxAmountCents, Memo: "Sales tax payable"})
 		}
 		entry, newRoot, err := s.createWorkflowJournalEntry(ctx, workflowJournalRequest{
 			Date:               invoice.InvoiceDate,
@@ -289,7 +327,7 @@ func (s *Store) PostInvoice(ctx Context, invoiceID string) (Invoice, string, err
 		root = newRoot
 		invoice.IssuedJournalEntryID = entry.ID
 	}
-	if invoice.Status == SourceDocumentImported {
+	if invoiceIsDraft(invoice.Status) {
 		invoice.Status = SourceDocumentOpen
 	}
 	invoice.UpdatedAt = s.now().UTC()
@@ -301,7 +339,7 @@ func (s *Store) PostInvoice(ctx Context, invoiceID string) (Invoice, string, err
 	if hash != "" {
 		root = hash
 	}
-	return invoice, root, nil
+	return enrichInvoice(invoice, s.now()), root, nil
 }
 
 func (s *Store) MarkInvoicePaid(ctx Context, invoiceID string, req InvoicePaymentRequest) (Invoice, string, error) {
@@ -323,7 +361,13 @@ func (s *Store) MarkInvoicePaid(ctx Context, invoiceID string, req InvoicePaymen
 	if invoice.Status == SourceDocumentVoid {
 		return Invoice{}, "", appErr(ErrValidation, "void invoice cannot be paid")
 	}
-	req.Date = strings.TrimSpace(req.Date)
+	req, err = normalizeInvoicePaymentRequest(req)
+	if err != nil {
+		return Invoice{}, "", err
+	}
+	if !paymentHasEvidence(req) {
+		return Invoice{}, "", appErr(ErrValidation, "invoice payment requires external_refs or manual_reason")
+	}
 	if req.Date == "" {
 		req.Date = s.now().UTC().Format("2006-01-02")
 	}
@@ -344,14 +388,11 @@ func (s *Store) MarkInvoicePaid(ctx Context, invoiceID string, req InvoicePaymen
 	if settings.AccountingBasis == AccountingBasisAccrual && invoice.IssuedJournalEntryID == "" {
 		return Invoice{}, "", appErr(ErrValidation, "accrual invoice must be posted before payment")
 	}
-	sourceKey := invoice.ID + ":paid:" + req.Date + ":" + int64String(req.AmountCents)
-	if req.ExternalSource != "" && req.ExternalID != "" {
-		sourceKey = "payment:" + strings.ToLower(strings.TrimSpace(req.ExternalSource)) + ":" + strings.TrimSpace(req.ExternalID)
-	}
+	sourceKey := invoicePaymentSourceKey(invoice.ID, req)
 	paymentID := makeID("pay", invoice.ID, req.Date, int64String(req.AmountCents), sourceKey)
 	for _, payment := range invoice.Payments {
-		if payment.ID == paymentID {
-			return invoice, st.Root, nil
+		if payment.ID == paymentID || paymentMatchesEvidence(payment, req) {
+			return enrichInvoice(invoice, s.now()), st.Root, nil
 		}
 	}
 	if err := ensurePostingDateOpen(st, req.Date); err != nil {
@@ -411,6 +452,8 @@ func (s *Store) MarkInvoicePaid(ctx Context, invoiceID string, req InvoicePaymen
 		ExternalSource:  strings.TrimSpace(req.ExternalSource),
 		ExternalID:      strings.TrimSpace(req.ExternalID),
 		PaymentEvidence: strings.TrimSpace(req.PaymentEvidence),
+		ExternalRefs:    req.ExternalRefs,
+		ManualReason:    strings.TrimSpace(req.ManualReason),
 	}
 	invoice.Payments = append(invoice.Payments, payment)
 	invoice.PaymentJournalEntryIDs = append(invoice.PaymentJournalEntryIDs, entry.ID)
@@ -424,7 +467,7 @@ func (s *Store) MarkInvoicePaid(ctx Context, invoiceID string, req InvoicePaymen
 	if hash != "" {
 		root = hash
 	}
-	return invoice, root, nil
+	return enrichInvoice(invoice, s.now()), root, nil
 }
 
 func (s *Store) ReverseInvoicePayment(ctx Context, invoiceID string, req InvoicePaymentReversalRequest) (Invoice, string, error) {
@@ -537,6 +580,29 @@ func (s *Store) ReverseInvoicePayment(ctx Context, invoiceID string, req Invoice
 func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 	invoice.InvoiceNumber = strings.TrimSpace(invoice.InvoiceNumber)
 	invoice.CustomerID = strings.TrimSpace(invoice.CustomerID)
+	invoice.Terms = strings.TrimSpace(invoice.Terms)
+	invoice.Currency = strings.ToUpper(strings.TrimSpace(invoice.Currency))
+	invoice.Memo = strings.TrimSpace(invoice.Memo)
+	invoice.PONumber = strings.TrimSpace(invoice.PONumber)
+	invoice.Kind = strings.TrimSpace(invoice.Kind)
+	invoice.CreditOfInvoiceID = strings.TrimSpace(invoice.CreditOfInvoiceID)
+	if invoice.Currency == "" {
+		invoice.Currency = "USD"
+	}
+	if invoice.Kind == "" {
+		invoice.Kind = InvoiceKindInvoice
+	}
+	if invoice.Kind != InvoiceKindInvoice && invoice.Kind != InvoiceKindCreditMemo {
+		return Invoice{}, appErr(ErrValidation, "invoice kind must be %q or %q", InvoiceKindInvoice, InvoiceKindCreditMemo)
+	}
+	if invoice.Kind == InvoiceKindCreditMemo && invoice.CreditOfInvoiceID == "" {
+		return Invoice{}, appErr(ErrValidation, "credit memo requires credit_of_invoice_id")
+	}
+	if invoice.CreditOfInvoiceID != "" {
+		if _, ok := st.Invoices[invoice.CreditOfInvoiceID]; !ok {
+			return Invoice{}, appErr(ErrValidation, "credit memo references unknown invoice %s", invoice.CreditOfInvoiceID)
+		}
+	}
 	if invoice.InvoiceNumber == "" {
 		return Invoice{}, appErr(ErrValidation, "invoice number is required")
 	}
@@ -630,16 +696,27 @@ func normalizeInvoice(st State, invoice Invoice) (Invoice, error) {
 	if invoice.TotalCents != total {
 		return Invoice{}, appErr(ErrValidation, "invoice total must equal subtotal plus tax")
 	}
-	if _, err := invoicePaidAmount(invoice); err != nil {
-		return Invoice{}, err
+	if invoice.RetainageCents < 0 {
+		return Invoice{}, appErr(ErrValidation, "invoice retainage cannot be negative")
 	}
 	if invoice.Status == "" {
-		invoice.Status = SourceDocumentImported
+		if invoice.Kind == InvoiceKindCreditMemo {
+			invoice.Status = InvoiceStatusDraft
+		} else {
+			invoice.Status = SourceDocumentImported
+		}
 	}
-	switch invoice.Status {
-	case SourceDocumentImported, SourceDocumentOpen, SourceDocumentPaid, SourceDocumentVoid:
-	default:
+	if !validInvoiceStatus(invoice.Status) {
 		return Invoice{}, appErr(ErrValidation, "invalid invoice status %q", invoice.Status)
+	}
+	paid, err := invoicePaidAmount(invoice)
+	if err != nil {
+		return Invoice{}, err
+	}
+	invoice.AmountPaidCents = paid
+	invoice.AmountDueCents = invoice.TotalCents - paid
+	if invoice.AmountDueCents < 0 {
+		invoice.AmountDueCents = 0
 	}
 	externalRefs, err := normalizeExternalRefs(invoice.ExternalRefs)
 	if err != nil {
@@ -684,8 +761,17 @@ func invoiceStatusFromPayments(invoice Invoice) (SourceDocumentStatus, error) {
 }
 
 func invoiceStatusFromPaidAmount(invoice Invoice, paid int64) SourceDocumentStatus {
-	if paid == invoice.TotalCents {
+	if invoice.TotalCents != 0 && paid == invoice.TotalCents {
 		return SourceDocumentPaid
+	}
+	if paid > 0 {
+		return InvoiceStatusPartiallyPaid
+	}
+	if invoice.SentAt.IsZero() == false || invoice.Status == InvoiceStatusSent {
+		return InvoiceStatusSent
+	}
+	if invoice.IssuedSnapshot != nil || invoice.Status == InvoiceStatusIssued {
+		return InvoiceStatusIssued
 	}
 	return SourceDocumentOpen
 }

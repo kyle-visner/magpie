@@ -267,10 +267,10 @@ func invoiceCloseBlockers(st State, through string) []CloseBlocker {
 	basis := st.effectiveSettings().AccountingBasis
 	for _, invoice := range st.Invoices {
 		if invoice.InvoiceDate <= through && invoice.Status != SourceDocumentVoid {
-			if invoice.Status == SourceDocumentImported {
+			if invoiceIsDraft(invoice.Status) {
 				blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("invoice %s is staged but not posted", invoice.InvoiceNumber)})
 			}
-			if basis == AccountingBasisAccrual && invoice.Status != SourceDocumentImported && invoice.IssuedJournalEntryID == "" {
+			if basis == AccountingBasisAccrual && !invoiceIsDraft(invoice.Status) && invoice.IssuedJournalEntryID == "" {
 				blockers = append(blockers, CloseBlocker{Code: "unposted_source_document", EntityID: invoice.ID, Message: fmt.Sprintf("accrual invoice %s has no issuance journal", invoice.InvoiceNumber)})
 			}
 			if invoice.IssuedJournalEntryID != "" {

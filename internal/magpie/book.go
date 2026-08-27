@@ -203,6 +203,62 @@ func (b *Book) ReverseInvoicePayment(id string, req InvoicePaymentReversalReques
 	return map[string]any{"root": root, "invoice": invoice}, nil
 }
 
+func (b *Book) IssueInvoice(id string) (map[string]any, error) {
+	invoice, root, err := b.Store.IssueInvoice(b.Ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"root": root, "invoice": invoice}, nil
+}
+
+func (b *Book) SendInvoice(id, to string) (map[string]any, error) {
+	result, root, err := b.Store.SendInvoice(b.Ctx, id, InvoiceSendRequest{To: to}, InvoicePublicOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"root": root, "send": result}, nil
+}
+
+func (b *Book) PublicLink(id, tenant, publicBaseURL string, rotate bool) (map[string]any, error) {
+	link, _, err := b.Store.PublicLink(b.Ctx, id, InvoicePublicOptions{Tenant: tenant, PublicBaseURL: publicBaseURL}, rotate)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"public_link": link}, nil
+}
+
+func (b *Book) VoidInvoice(id, reason string) (map[string]any, error) {
+	invoice, root, err := b.Store.VoidInvoice(b.Ctx, id, reason)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"root": root, "invoice": invoice}, nil
+}
+
+func (b *Book) CreateCreditMemo(invoice Invoice) (map[string]any, error) {
+	created, root, err := b.Store.CreateCreditMemo(b.Ctx, invoice)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"root": root, "invoice": created}, nil
+}
+
+func (b *Book) RemindInvoice(id string) (map[string]any, error) {
+	result, root, err := b.Store.RemindInvoice(b.Ctx, id, InvoicePublicOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"root": root, "remind": result}, nil
+}
+
+func (b *Book) UpdateDraftInvoice(invoice Invoice) (map[string]any, error) {
+	updated, root, err := b.Store.UpdateDraftInvoice(b.Ctx, invoice)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"root": root, "invoice": updated}, nil
+}
+
 func (b *Book) ListPayouts() (map[string]Payout, error) {
 	st, err := b.require(PermissionLedgerRead)
 	if err != nil {
@@ -432,6 +488,63 @@ func (b *Book) Invoke(name string, params json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return b.ReverseInvoicePayment(in.InvoiceID, in.InvoicePaymentReversalRequest)
+	case "invoice_issue":
+		var in struct {
+			InvoiceID string `json:"invoice_id"`
+		}
+		if err := decodeParams(params, &in); err != nil {
+			return nil, err
+		}
+		return b.IssueInvoice(in.InvoiceID)
+	case "invoice_send":
+		var in struct {
+			InvoiceID string `json:"invoice_id"`
+			To        string `json:"to"`
+		}
+		if err := decodeParams(params, &in); err != nil {
+			return nil, err
+		}
+		return b.SendInvoice(in.InvoiceID, in.To)
+	case "invoice_public_link":
+		var in struct {
+			InvoiceID     string `json:"invoice_id"`
+			Tenant        string `json:"tenant"`
+			PublicBaseURL string `json:"public_base_url"`
+			Rotate        bool   `json:"rotate"`
+		}
+		if err := decodeParams(params, &in); err != nil {
+			return nil, err
+		}
+		return b.PublicLink(in.InvoiceID, in.Tenant, in.PublicBaseURL, in.Rotate)
+	case "invoice_void":
+		var in struct {
+			InvoiceID string `json:"invoice_id"`
+			Reason    string `json:"reason"`
+		}
+		if err := decodeParams(params, &in); err != nil {
+			return nil, err
+		}
+		return b.VoidInvoice(in.InvoiceID, in.Reason)
+	case "invoice_remind":
+		var in struct {
+			InvoiceID string `json:"invoice_id"`
+		}
+		if err := decodeParams(params, &in); err != nil {
+			return nil, err
+		}
+		return b.RemindInvoice(in.InvoiceID)
+	case "invoice_update":
+		var invoice Invoice
+		if err := decodeParams(params, &invoice); err != nil {
+			return nil, err
+		}
+		return b.UpdateDraftInvoice(invoice)
+	case "credit_memo_create":
+		var invoice Invoice
+		if err := decodeParams(params, &invoice); err != nil {
+			return nil, err
+		}
+		return b.CreateCreditMemo(invoice)
 	case "payout_list":
 		return b.ListPayouts()
 	case "payout_get":
@@ -601,14 +714,48 @@ func ToolCatalog() []Tool {
 			"payment":  map[string]any{"type": "object"},
 		})),
 		tool("invoice_post", "Post an invoice. Cash vs accrual semantics follow book settings.", objectSchema([]string{"invoice_id"}, map[string]any{"invoice_id": map[string]any{"type": "string"}})),
-		tool("invoice_mark_paid", "Record an invoice payment against a cash or bank account. "+cents, objectSchema([]string{"invoice_id", "date", "amount_cents", "cash_account_id"}, map[string]any{
+		tool("invoice_mark_paid", "Record an invoice payment against a cash or bank account. Never mark paid without external_refs or manual_reason. "+cents, objectSchema([]string{"invoice_id", "amount_cents", "cash_account_id"}, map[string]any{
 			"invoice_id":       map[string]any{"type": "string"},
 			"date":             map[string]any{"type": "string"},
+			"paid_date":        map[string]any{"type": "string"},
 			"amount_cents":     map[string]any{"type": "integer"},
 			"cash_account_id":  map[string]any{"type": "string"},
 			"external_source":  map[string]any{"type": "string"},
 			"external_id":      map[string]any{"type": "string"},
 			"payment_evidence": map[string]any{"type": "string"},
+			"external_refs":    map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+			"manual_reason":    map[string]any{"type": "string"},
+		})),
+		tool("invoice_issue", "Issue a draft invoice. Freezes an immutable snapshot and posts accrual journals. Prefer this over invoice_post for tenant invoicing.", objectSchema([]string{"invoice_id"}, map[string]any{"invoice_id": map[string]any{"type": "string"}})),
+		tool("invoice_send", "Record a send of an issued invoice and return the public link. Attach the issued PDF when mail is configured.", objectSchema([]string{"invoice_id"}, map[string]any{
+			"invoice_id": map[string]any{"type": "string"},
+			"to":         map[string]any{"type": "string"},
+		})),
+		tool("invoice_public_link", "Mint a high-entropy public invoice token (hashed at rest). Calling again rotates the token.", objectSchema([]string{"invoice_id"}, map[string]any{
+			"invoice_id":      map[string]any{"type": "string"},
+			"tenant":          map[string]any{"type": "string"},
+			"public_base_url": map[string]any{"type": "string"},
+			"rotate":          map[string]any{"type": "boolean"},
+		})),
+		tool("invoice_void", "Void an unpaid invoice. Issued invoices are immutable; corrections use void plus a credit memo.", objectSchema([]string{"invoice_id", "reason"}, map[string]any{
+			"invoice_id": map[string]any{"type": "string"},
+			"reason":     map[string]any{"type": "string"},
+		})),
+		tool("invoice_remind", "Stub reminder: records reminded_at and returns the public link. Full reminder cadence is deferred.", objectSchema([]string{"invoice_id"}, map[string]any{"invoice_id": map[string]any{"type": "string"}})),
+		tool("invoice_update", "Update a draft invoice. Rejected after issue.", objectSchema([]string{"id"}, map[string]any{
+			"id":             map[string]any{"type": "string"},
+			"invoice_number": map[string]any{"type": "string"},
+			"customer_id":    map[string]any{"type": "string"},
+			"invoice_date":   map[string]any{"type": "string"},
+			"due_date":       map[string]any{"type": "string"},
+			"line_items":     map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+		})),
+		tool("credit_memo_create", "Create a credit-memo invoice linked to an issued invoice. Do not edit the original.", objectSchema([]string{"credit_of_invoice_id", "customer_id", "invoice_date", "line_items"}, map[string]any{
+			"credit_of_invoice_id": map[string]any{"type": "string"},
+			"customer_id":          map[string]any{"type": "string"},
+			"invoice_number":       map[string]any{"type": "string"},
+			"invoice_date":         map[string]any{"type": "string"},
+			"line_items":           map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 		})),
 		tool("invoice_reverse_payment", "Reverse an invoice payment. Corrections reverse; they do not edit or delete.", objectSchema([]string{"invoice_id", "date", "reason"}, map[string]any{
 			"invoice_id":       map[string]any{"type": "string"},
