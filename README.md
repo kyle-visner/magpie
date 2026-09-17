@@ -174,14 +174,14 @@ export JAYBASE_TOKEN='writer-token-from-the-secret-manager'
 `--jaybase-url` may override the origin, but the token is accepted only through
 `JAYBASE_TOKEN`. Hosted state replay first reads metadata pages bounded to one
 captured root, then requests decrypted payloads only for Magpie-owned events;
-accepted `martin.*` payloads are not fetched. Audit output remains metadata-only.
+accepted foreign application payloads (`martin.*`, `folio.*`, or any other `app.*` namespace Magpie does not own) are not fetched. Audit output remains metadata-only.
 Writes use Jaybase's `expected_root` and `Idempotency-Key` contract and return a
 conflict instead of overwriting a newer root.
 
 Magpie can share one linear Jaybase history with Martin. Replay applies the
-legacy Magpie node types, skips `martin.*` nodes while still advancing to their
-roots, and fails closed for other unknown node types or malformed Magpie
-events. `magpie init` adds the Magpie bootstrap after a foreign-only history and
+legacy Magpie node types, skips other applications' namespaced nodes while still advancing to their
+roots, and fails closed for unknown Magpie types or malformed Magpie
+events. A new Jaybase app does not need a Magpie change to share the root. `magpie init` adds the Magpie bootstrap after a foreign-only history and
 remains idempotent once that bootstrap exists.
 
 For development without building first, use:
@@ -1150,7 +1150,7 @@ Each hosted command currently reconstructs state by scanning the complete event
 metadata chain, with every page bounded to the root captured at the start of
 replay. Magpie classifies those records from metadata and retrieves decrypted
 payloads in selective batches only for Magpie-owned event types. Accepted
-`martin.*` events still advance the shared root, but their payloads are not
+Foreign namespaced events still advance the shared root, but their payloads are not
 fetched, so a corrupt or key-mismatched foreign payload does not prevent Magpie
 state replay. Unknown event types, missing selected payloads, and integrity
 errors in selected Magpie payloads still fail closed.

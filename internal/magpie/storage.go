@@ -60,10 +60,6 @@ var legacyMagpieNodeTypes = map[string]struct{}{
 	"store.init":       {},
 }
 
-var foreignApplicationPrefixes = []string{
-	"martin.",
-}
-
 func OpenStore(dir string) (*Store, error) {
 	db, err := jaybase.OpenStore(dir)
 	if err != nil {
@@ -510,13 +506,30 @@ func classifyNodeType(node Node) (bool, error) {
 	if _, ok := legacyMagpieNodeTypes[node.Type]; ok {
 		return true, nil
 	}
-	for _, prefix := range foreignApplicationPrefixes {
-		if strings.HasPrefix(node.Type, prefix) {
-			return false, nil
-		}
+	if isForeignApplicationType(node.Type) {
+		return false, nil
 	}
 	return false, appErr(ErrValidation, "unknown event type %q in node %s", node.Type, node.Hash)
 }
+
+// isForeignApplicationType reports other Jaybase applications' namespaced
+// node types (app.*). Magpie skips those without an allowlist so a new app
+// does not require a Magpie change. Unknown types in Magpie's own namespaces
+// and unknown unnamespaced types still fail closed.
+func isForeignApplicationType(typ string) bool {
+	head, _, namespaced := strings.Cut(typ, ".")
+	_, reserved := magpieReservedTypePrefix[head]
+	return namespaced && !reserved
+}
+
+var magpieReservedTypePrefix = func() map[string]struct{} {
+	out := make(map[string]struct{}, len(legacyMagpieNodeTypes))
+	for typ := range legacyMagpieNodeTypes {
+		head, _, _ := strings.Cut(typ, ".")
+		out[head] = struct{}{}
+	}
+	return out
+}()
 
 func (s *Store) nodePayload(node Node) ([]byte, error) {
 	payload, err := s.db.NodePayload(node)
