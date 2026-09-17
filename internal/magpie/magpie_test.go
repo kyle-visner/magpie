@@ -1952,6 +1952,58 @@ func TestSharedHistorySkipsForeignPayloadAndUsesForeignRootForNextWrite(t *testi
 	}
 }
 
+func TestSharedHistorySkipsFolioPayloadAndUsesForeignRootForNextWrite(t *testing.T) {
+	s, ctx := newTestStore(t)
+	initRoot, err := s.currentRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignRoot, err := s.appendEventAt(ctx, "folio.workspace.initialized.v1", "folio:workspace", "workspace init", map[string]any{
+		"schema_family":  "folio",
+		"schema_version": 1,
+	}, initRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &payloadRecordingBackend{storageBackend: s.db}
+	s.db = recorder
+	repeatedInitRoot, err := s.WriteInitialRoot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedInitRoot != foreignRoot {
+		t.Fatalf("repeated initialization did not preserve the folio head: got %s want %s", repeatedInitRoot, foreignRoot)
+	}
+
+	note, noteRoot, err := s.UpsertNote(ctx, "", "Shared history", "Magpie remains writable after folio", "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noteRoot == foreignRoot {
+		t.Fatal("Magpie write did not advance the shared root")
+	}
+	for _, typ := range recorder.payloadTypes {
+		if strings.HasPrefix(typ, "folio.") {
+			t.Fatalf("folio payload was decrypted during local replay: %#v", recorder.payloadTypes)
+		}
+	}
+
+	state, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != noteRoot || state.Notes[note.ID].Body != "Magpie remains writable after folio" {
+		t.Fatalf("shared history replay produced unexpected state: %#v", state)
+	}
+	nodes, err := s.AuditLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 3 || nodes[1].Hash != foreignRoot || nodes[2].Parents[0] != foreignRoot {
+		t.Fatalf("Magpie append was not based on the folio head: %#v", nodes)
+	}
+}
+
 func TestSharedHistoryInitializationIsDomainAwareAndIdempotent(t *testing.T) {
 	s, err := OpenStore(t.TempDir())
 	if err != nil {

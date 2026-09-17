@@ -174,12 +174,12 @@ export JAYBASE_TOKEN='writer-token-from-the-secret-manager'
 `--jaybase-url` may override the origin, but the token is accepted only through
 `JAYBASE_TOKEN`. Hosted state replay first reads metadata pages bounded to one
 captured root, then requests decrypted payloads only for Magpie-owned events;
-accepted `martin.*` payloads are not fetched. Audit output remains metadata-only.
+accepted `martin.*` and `folio.*` payloads are not fetched. Audit output remains metadata-only.
 Writes use Jaybase's `expected_root` and `Idempotency-Key` contract and return a
 conflict instead of overwriting a newer root.
 
 Magpie can share one linear Jaybase history with Martin. Replay applies the
-legacy Magpie node types, skips `martin.*` nodes while still advancing to their
+legacy Magpie node types, skips `martin.*` and `folio.*` nodes while still advancing to their
 roots, and fails closed for other unknown node types or malformed Magpie
 events. `magpie init` adds the Magpie bootstrap after a foreign-only history and
 remains idempotent once that bootstrap exists.
@@ -1150,7 +1150,7 @@ Each hosted command currently reconstructs state by scanning the complete event
 metadata chain, with every page bounded to the root captured at the start of
 replay. Magpie classifies those records from metadata and retrieves decrypted
 payloads in selective batches only for Magpie-owned event types. Accepted
-`martin.*` events still advance the shared root, but their payloads are not
+`martin.*` and `folio.*` events still advance the shared root, but their payloads are not
 fetched, so a corrupt or key-mismatched foreign payload does not prevent Magpie
 state replay. Unknown event types, missing selected payloads, and integrity
 errors in selected Magpie payloads still fail closed.

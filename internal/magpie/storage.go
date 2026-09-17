@@ -62,6 +62,7 @@ var legacyMagpieNodeTypes = map[string]struct{}{
 
 var foreignApplicationPrefixes = []string{
 	"martin.",
+	"folio.",
 }
 
 func OpenStore(dir string) (*Store, error) {
