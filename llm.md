@@ -101,7 +101,7 @@ Rules for hosted mode:
 - Hosted commands scan the complete event metadata chain, bounded to one
   captured root, and retrieve decrypted payloads only for Magpie-owned events
   through Jaybase's selective payload endpoint. Accepted foreign namespaces
-  (`martin.*`, `folio.*`) advance the shared root without fetching their payloads. Metadata scanning
+  (any `app.*` Magpie does not own) advance the shared root without fetching their payloads. Metadata scanning
   and selected-payload retrieval still grow with history size.
 
 Magpie's `--actor` is a domain identity, not proof of authentication. Jaybase
@@ -131,8 +131,8 @@ magpie --store /absolute/path/to/book.magpie --actor owner init
 
 Initialization is idempotent. It creates the `owner` user with the `Owner` role
 and sets the book to `cash` accounting. A shared Jaybase history may already
-contain `martin.*` or `folio.*` events; Magpie adds its own bootstrap and ignores those
-foreign events while preserving the shared root.
+contain other applications' namespaced events; Magpie adds its own bootstrap and ignores those
+foreign events while preserving the shared root. A new Jaybase app does not need a Magpie change.
 
 Before any financial workflow, inspect:
 
