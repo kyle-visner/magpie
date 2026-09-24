@@ -327,7 +327,7 @@ func TestEmptyPeriodClosePackageBackdateReopenAndRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if close.Manifest.SourceRoot == "" || close.Root == "" || close.Manifest.SnapshotName == "" || len(close.Manifest.ReportSHA256) != 8 {
+	if close.Manifest.SourceRoot == "" || close.Root == "" || !strings.HasPrefix(close.Manifest.SnapshotName, RefPrefix+"period-close-") || len(close.Manifest.ReportSHA256) != 8 {
 		t.Fatalf("incomplete close provenance: %#v", close)
 	}
 	if ref, err := s.db.NamedRef(close.Manifest.SnapshotName); err != nil || ref != close.Root {

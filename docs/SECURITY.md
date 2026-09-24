@@ -15,6 +15,7 @@ This document records the Phase 1 controls intended to support SOC 2, PCI DSS, a
 - Audit history is reconstructed from the same immutable DAG used as source of truth.
 - The Phase 1 CLI and MCP server have no SQL, graph-query, vector-query, or raw mutation escape hatch.
 - Hosted Jaybase access requires a bearer token and HTTPS outside loopback development.
+- New Magpie writes fit one JayBase namespace (`magpie.*`) and the `magpie-*` ref prefix, so a writer token can be scoped to that catalog. `WriterCatalog()` lists the exact types and commands for a host to install. Magpie does not configure `JAYBASE_CATALOG_FILE` or turn enforcement on.
 - Remote MCP (`magpie mcp --http`) requires `MAGPIE_MCP_TOKEN` in the environment. That token is not the Jaybase token. The Magpie actor is bound at process start.
 - Hosted appends use optimistic root preconditions and stable idempotency keys, so concurrent changes and ambiguous retries cannot silently duplicate or overwrite events.
 - Hosted replay follows the authenticated, payload-explicit, paginated `/v1/events` API rather than reading Jaybase data files directly.

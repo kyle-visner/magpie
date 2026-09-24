@@ -103,6 +103,11 @@ Rules for hosted mode:
   through Jaybase's selective payload endpoint. Accepted foreign namespaces
   (any `app.*` Magpie does not own) advance the shared root without fetching their payloads. Metadata scanning
   and selected-payload retrieval still grow with history size.
+- New appends use `magpie.*` types and the exact commands from `WriterCatalog()`.
+  A scoped token can allow `magpie.*` and refs `magpie-*`. Replay still reads
+  older type names in place, including undotted `customer`, `invoice`, `note`,
+  and `payout`. Historical `period-close-*` refs stay under that name when a
+  close is repaired. Magpie does not set `JAYBASE_CATALOG_FILE`.
 
 Magpie's `--actor` is a domain identity, not proof of authentication. Jaybase
 authenticates the bearer token but does not prove that it belongs to the actor
@@ -182,8 +187,9 @@ command list; use this guide and the README for command-specific contracts.
 - Generic `ledger journal create` is a privileged manual adjustment or import
   path. It requires `ledger:write`, `journal:adjust`, a balanced entry, and a
   nonempty `manual_reason`.
-- Before a large or risky workflow, create a named snapshot. A Magpie snapshot
-  is a root checkpoint, not an off-host backup.
+- Before a large or risky workflow, create a named snapshot. The stored ref is
+  `magpie-` plus the name when the name does not already start with `magpie-`.
+  A Magpie snapshot is a root checkpoint, not an off-host backup.
 - Corrections preserve history. Reverse an invoice payment with
   `invoice reverse-payment`; do not attempt to edit or delete the original
   payment or journal.

@@ -178,11 +178,18 @@ accepted foreign application payloads (`martin.*`, `folio.*`, or any other `app.
 Writes use Jaybase's `expected_root` and `Idempotency-Key` contract and return a
 conflict instead of overwriting a newer root.
 
-Magpie can share one linear Jaybase history with Martin. Replay applies the
-legacy Magpie node types, skips other applications' namespaced nodes while still advancing to their
-roots, and fails closed for unknown Magpie types or malformed Magpie
-events. A new Jaybase app does not need a Magpie change to share the root. `magpie init` adds the Magpie bootstrap after a foreign-only history and
-remains idempotent once that bootstrap exists.
+Magpie can share one linear Jaybase history with Martin. New Magpie events use
+the `magpie` namespace (`magpie.customer`, `magpie.book.settings`, and the rest
+of `WriterCatalog()`), so one scoped writer token can allow `magpie.*`. Replay
+still applies older type names already in the history, including undotted
+`customer`, `invoice`, `note`, and `payout`, and skips other applications'
+namespaced nodes while still advancing to their roots. Unknown types in
+Magpie's namespaces and malformed Magpie events fail closed. A new Jaybase app
+does not need a Magpie change to share the root. `magpie init` adds the Magpie
+bootstrap after a foreign-only history and remains idempotent once that
+bootstrap exists. Named snapshots and new period-close refs use the `magpie-*`
+prefix. Magpie does not set `JAYBASE_CATALOG_FILE` and does not turn catalog
+enforcement on.
 
 For development without building first, use:
 

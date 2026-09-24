@@ -43,23 +43,6 @@ type eventEnvelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-var legacyMagpieNodeTypes = map[string]struct{}{
-	"book.settings":    {},
-	"bank.statement":   {},
-	"bank.transaction": {},
-	"customer":         {},
-	"invoice":          {},
-	"ledger.account":   {},
-	"ledger.journal":   {},
-	"note":             {},
-	"payout":           {},
-	"period.close":     {},
-	"period.reopen":    {},
-	"rbac.role":        {},
-	"rbac.user":        {},
-	"store.init":       {},
-}
-
 func OpenStore(dir string) (*Store, error) {
 	db, err := jaybase.OpenStore(dir)
 	if err != nil {
@@ -178,7 +161,7 @@ func (s *Store) WriteInitialRoot(ctx Context) (string, error) {
 			return state.Root, nil
 		}
 
-		root, err := s.appendEventAt(ctx, "store.init", "", "store init", initEvent(), state.Root)
+		root, err := s.appendCatalogEvent(ctx, TypeStoreInit, "", CmdStoreInit, initEvent(), state.Root)
 		if err == nil {
 			return root, nil
 		}
@@ -209,6 +192,15 @@ func (s *Store) appendEvent(ctx Context, typ, entityID, command string, payload 
 			return "", err
 		}
 		expectedRoot = state.Root
+	}
+	return s.appendEventAt(ctx, typ, entityID, command, payload, expectedRoot)
+}
+
+// appendCatalogEvent appends a type and command from WriterCatalog. Callers
+// that inject historical or foreign nodes use appendEventAt directly.
+func (s *Store) appendCatalogEvent(ctx Context, typ, entityID, command string, payload any, expectedRoot string) (string, error) {
+	if err := validateCatalogAppend(typ, command); err != nil {
+		return "", err
 	}
 	return s.appendEventAt(ctx, typ, entityID, command, payload, expectedRoot)
 }
@@ -499,11 +491,11 @@ func (s *Store) applyNodeWithMetadata(st *State, node Node) (bool, error) {
 	default:
 		return false, appErr(ErrValidation, "unknown event kind %q in node %s", env.Kind, node.Hash)
 	}
-	return node.Type == "store.init" && env.Kind == "init", nil
+	return isStoreInitType(node.Type) && env.Kind == "init", nil
 }
 
 func classifyNodeType(node Node) (bool, error) {
-	if _, ok := legacyMagpieNodeTypes[node.Type]; ok {
+	if isMagpieNodeType(node.Type) {
 		return true, nil
 	}
 	if isForeignApplicationType(node.Type) {
@@ -514,22 +506,14 @@ func classifyNodeType(node Node) (bool, error) {
 
 // isForeignApplicationType reports other Jaybase applications' namespaced
 // node types (app.*). Magpie skips those without an allowlist so a new app
-// does not require a Magpie change. Unknown types in Magpie's own namespaces
-// and unknown unnamespaced types still fail closed.
+// does not require a Magpie change. Unknown types in Magpie's own namespaces,
+// including historical prefixes still reserved for replay, and unknown
+// unnamespaced types still fail closed.
 func isForeignApplicationType(typ string) bool {
 	head, _, namespaced := strings.Cut(typ, ".")
 	_, reserved := magpieReservedTypePrefix[head]
 	return namespaced && !reserved
 }
-
-var magpieReservedTypePrefix = func() map[string]struct{} {
-	out := make(map[string]struct{}, len(legacyMagpieNodeTypes))
-	for typ := range legacyMagpieNodeTypes {
-		head, _, _ := strings.Cut(typ, ".")
-		out[head] = struct{}{}
-	}
-	return out
-}()
 
 func (s *Store) nodePayload(node Node) ([]byte, error) {
 	payload, err := s.db.NodePayload(node)

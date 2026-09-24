@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -125,7 +126,7 @@ func TestRemoteStoreAgainstMergedJaybaseServer(t *testing.T) {
 	if state.Root != secondRoot || state.Notes[note.ID].Body != "second" {
 		t.Fatalf("merged Jaybase replay mismatch: %#v", state)
 	}
-	ref, err := harness.jaybaseStore.NamedRef("integration-checkpoint")
+	ref, err := harness.jaybaseStore.NamedRef("magpie-integration-checkpoint")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,4 +246,134 @@ func TestRemoteStoreBankReconciliationClosesAndReproducesPackage(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "closed period") {
 		t.Fatalf("hosted closed-period guard did not reject a backdated journal: %v", err)
 	}
+	if !strings.HasPrefix(close.Manifest.SnapshotName, RefPrefix) {
+		t.Fatalf("hosted close ref %q is outside %s", close.Manifest.SnapshotName, RefPrefix)
+	}
+}
+
+// The catalog file exists only in this test's temp directory. Magpie does not
+// read JAYBASE_CATALOG_FILE and this test does not set it.
+func TestScopedWriterAcceptsCatalogTypesAndRejectsLegacyUndottedNames(t *testing.T) {
+	token := strings.Repeat("s", 64)
+	digest := sha256.Sum256([]byte(token))
+	authJSON, err := json.Marshal(map[string]any{
+		"tokens": []map[string]any{{
+			"id": "magpie-scoped", "role": "writer", "sha256": hex.EncodeToString(digest[:]),
+			"allow": map[string]any{
+				"types": []string{"magpie.*"},
+				"refs":  []string{RefPattern},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(authPath, authJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := jaybaseserver.LoadAuthenticator(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := jaybaseserver.LoadCatalog(filepath.Join(t.TempDir(), "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range WriterCatalog() {
+		if _, _, err := catalog.Install(entry.Type, entry.Commands); err != nil {
+			t.Fatalf("install %s: %v", entry.Type, err)
+		}
+	}
+	jaybaseStore, err := jaybase.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = jaybaseStore.Close() })
+	api, err := jaybaseserver.New(jaybaseserver.Options{
+		Store: jaybaseStore, Auth: auth, Catalog: catalog,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(api.Handler())
+	t.Cleanup(httpServer.Close)
+	store, err := openRemoteStore(httpServer.URL, token, httpServer.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := Context{Actor: "owner"}
+	if _, err := store.WriteInitialRoot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.UpsertNote(ctx, "", "Scoped", "catalog write", "internal"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.CreateSnapshot(ctx, "scoped-save")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Name != "magpie-scoped-save" {
+		t.Fatalf("snapshot name = %q", snapshot.Name)
+	}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Notes == nil || len(state.Notes) != 1 {
+		t.Fatalf("scoped replay lost the note: %#v", state.Notes)
+	}
+
+	legacy := postJaybase(t, httpServer.Client(), httpServer.URL, token, "/v1/events", map[string]any{
+		"type": "note", "command": "note upsert", "payload": map[string]any{"kind": "probe"},
+		"expected_root": state.Root,
+	}, "legacy-note-probe")
+	if legacy.StatusCode != http.StatusForbidden {
+		t.Fatalf("legacy undotted type status = %d body %s", legacy.StatusCode, legacy.Body)
+	}
+	oldRef := postJaybase(t, httpServer.Client(), httpServer.URL, token, "/v1/refs/period-close-2026-01-31-r1", map[string]any{
+		"root": state.Root, "expected_root": "",
+	}, "")
+	if oldRef.StatusCode != http.StatusForbidden {
+		t.Fatalf("legacy period-close ref status = %d body %s", oldRef.StatusCode, oldRef.Body)
+	}
+}
+
+type jaybaseHTTPResult struct {
+	StatusCode int
+	Body       string
+}
+
+func postJaybase(t *testing.T, client *http.Client, baseURL, token, path string, payload any, idempotencyKey string) jaybaseHTTPResult {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	method := http.MethodPost
+	if strings.Contains(path, "/v1/refs/") {
+		method = http.MethodPut
+	}
+	request, err := http.NewRequest(method, baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	if idempotencyKey != "" {
+		request.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return jaybaseHTTPResult{StatusCode: response.StatusCode, Body: string(raw)}
 }

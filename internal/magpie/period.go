@@ -361,7 +361,7 @@ func (s *Store) CompletePeriodClose(ctx Context, through string) (PeriodClose, e
 	closeID := makeID("close", through, fmt.Sprintf("%d", revision), st.Root)
 	packageID := makeID("close-package", closeID)
 	originalPackageID, previousPackageID := packageLineage(st, through, packageID)
-	snapshotName := fmt.Sprintf("period-close-%s-r%d", through, revision)
+	snapshotName := periodCloseRefName(through, revision)
 	parameters, err := closeReportParameters(st, through)
 	if err != nil {
 		return PeriodClose{}, err
@@ -387,7 +387,7 @@ func (s *Store) CompletePeriodClose(ctx Context, through string) (PeriodClose, e
 		Through: through, Accounts: accounts, Parameters: parameters, ReportSHA256: hashes,
 		UnresolvedExceptions: []CloseBlocker{}, ClosedAt: closedAt, ClosedBy: ctx.Actor,
 	}}
-	root, err := s.appendEventAt(ctx, "period.close", close.ID, "period close complete", wrapEvent("period.close.complete", periodClosePayload{Close: close}), st.Root)
+	root, err := s.appendCatalogEvent(ctx, TypePeriodClose, close.ID, CmdPeriodCloseComplete, wrapEvent("period.close.complete", periodClosePayload{Close: close}), st.Root)
 	if err != nil {
 		return PeriodClose{}, err
 	}
@@ -422,7 +422,7 @@ func (s *Store) ReopenPeriod(ctx Context, through, reason string) (PeriodReopen,
 	}
 	reopenedAt := s.now().UTC()
 	reopen := PeriodReopen{ID: makeID("reopen", active.ID, reason, reopenedAt.Format(time.RFC3339Nano)), CloseID: active.ID, Through: through, Reason: reason, ReopenedAt: reopenedAt, ReopenedBy: ctx.Actor}
-	root, err := s.appendEventAt(ctx, "period.reopen", reopen.ID, "period reopen", wrapEvent("period.reopen", periodReopenPayload{Reopen: reopen}), st.Root)
+	root, err := s.appendCatalogEvent(ctx, TypePeriodReopen, reopen.ID, CmdPeriodReopen, wrapEvent("period.reopen", periodReopenPayload{Reopen: reopen}), st.Root)
 	if err != nil {
 		return PeriodReopen{}, err
 	}

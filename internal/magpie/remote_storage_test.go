@@ -329,7 +329,7 @@ func TestRemoteStoreUsesHostedJaybaseContract(t *testing.T) {
 	if len(stub.expectedRoots) != 3 || stub.expectedRoots[0] != "" || stub.expectedRoots[1] != initRoot || stub.expectedRoots[2] != noteRoot {
 		t.Fatalf("unexpected optimistic concurrency roots: %#v", stub.expectedRoots)
 	}
-	if stub.namedRefs["before-close"] != updatedRoot {
+	if stub.namedRefs["magpie-before-close"] != updatedRoot {
 		t.Fatalf("named ref was not written through the hosted API: %#v", stub.namedRefs)
 	}
 	if stub.compatReads != 0 || len(stub.payloadReads) == 0 {
@@ -516,8 +516,8 @@ func TestRemoteConcurrentSameRootSnapshotsAreIdempotent(t *testing.T) {
 	}
 	stub.mu.Lock()
 	defer stub.mu.Unlock()
-	if stub.namedRefs["concurrent"] != root {
-		t.Fatalf("concurrent named ref = %q, want %q", stub.namedRefs["concurrent"], root)
+	if stub.namedRefs["magpie-concurrent"] != root {
+		t.Fatalf("concurrent named ref = %q, want %q", stub.namedRefs["magpie-concurrent"], root)
 	}
 }
 
@@ -544,7 +544,7 @@ func TestRemoteInitialRootReconcilesConcurrentWinner(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/events" && initialized.Load():
 			writeStubJSON(w, http.StatusOK, map[string]any{
 				"events": []jaybase.Node{{
-					Schema: 1, Hash: winner, Type: "store.init",
+					Schema: 1, Hash: winner, Type: "store.init", // legacy init type must still replay
 					Actor: "owner", Command: "store init", CreatedAt: time.Now().UTC(),
 				}},
 				"root": winner, "has_more": false,

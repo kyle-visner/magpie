@@ -126,7 +126,7 @@ func TestFirstStatementCreatesGuardedOpeningBalanceWithoutJournalAdjust(t *testi
 	}
 	ctx := Context{Actor: "bookkeeper"}
 	input := bankStatementFixture(bank, "first-opening", 12500, 12500)
-	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: "bank statement import"}
+	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: CmdBankStatementImport}
 	s.db = backend
 	if _, _, err := s.ImportBankStatement(ctx, input); err == nil {
 		t.Fatal("expected injected statement append failure after opening journal")
@@ -227,7 +227,7 @@ func TestBankMultiEventWorkflowRecoversAfterStaleRootWithoutDuplicateJournal(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: "bank transaction post"}
+	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: CmdBankTransactionPost}
 	s.db = backend
 	if _, _, err := s.PostBankTransaction(ctx, txn.ID, expense.ID); err == nil {
 		t.Fatal("expected injected stale-root failure after journal append")
@@ -267,7 +267,7 @@ func TestBankTransferPairAndReverseRecoverPartialWorkflowWrites(t *testing.T) {
 	}
 	fromTxn, _, _ := s.ImportBankTransaction(ctx, bankTransactionFixture(fromStatement, "partial-from-txn", "2026-06-10", -100))
 	toTxn, _, _ := s.ImportBankTransaction(ctx, bankTransactionFixture(toStatement, "partial-to-txn", "2026-06-10", 100))
-	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: "bank transfer pair"}
+	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: CmdBankTransferPair}
 	s.db = backend
 	if _, _, err := s.PairBankTransfer(ctx, fromTxn.ID, toTxn.ID); err == nil {
 		t.Fatal("expected injected transfer-pair document append failure")
@@ -279,7 +279,7 @@ func TestBankTransferPairAndReverseRecoverPartialWorkflowWrites(t *testing.T) {
 	if len(paired) != 2 || paired[0].Status != BankTransactionPaired {
 		t.Fatalf("unexpected recovered transfer: %#v", paired)
 	}
-	backend.command = "bank transfer reverse"
+	backend.command = CmdBankTransferReverse
 	backend.failed = false
 	if _, _, err := s.ReverseBankTransfer(ctx, fromTxn.ID, toTxn.ID, "wrong match", ""); err == nil {
 		t.Fatal("expected injected transfer-reverse document append failure")
@@ -336,7 +336,7 @@ func TestBankTransactionCorrectionsPreserveHistoryAndExactlyReverse(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: "bank transaction reverse"}
+	backend := &failBankDocumentAppendOnceBackend{storageBackend: s.db, command: CmdBankTransactionReverse}
 	s.db = backend
 	if _, _, err := s.ReverseBankTransaction(ctx, txn.ID, "classification needs to be redone", ""); err == nil {
 		t.Fatal("expected injected transaction-reversal state append failure")

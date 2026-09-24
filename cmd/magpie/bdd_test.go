@@ -49,7 +49,7 @@ func TestBDDCLIProtectsNotesSnapshotsAndAudit(t *testing.T) {
 	world.step("And Owner can create a named snapshot and audit the note write", func() {
 		snapshot := world.runOK("snapshot", "create", "--name", "pre-close")
 		snapshotRoot = stringField(t, snapshot, "root")
-		if snapshotRoot == "" || stringField(t, snapshot, "name") != "pre-close" {
+		if snapshotRoot == "" || stringField(t, snapshot, "name") != "magpie-pre-close" {
 			t.Fatalf("unexpected snapshot response: %#v", snapshot)
 		}
 
@@ -57,7 +57,7 @@ func TestBDDCLIProtectsNotesSnapshotsAndAudit(t *testing.T) {
 		world.unmarshal(world.runRawOK("audit"), &nodes)
 		var sawNote bool
 		for _, node := range nodes {
-			if stringField(t, node, "type") == "note" && stringField(t, node, "command") == "note upsert" {
+			if stringField(t, node, "type") == "magpie.note" && stringField(t, node, "command") == "note upsert" {
 				sawNote = true
 				break
 			}
