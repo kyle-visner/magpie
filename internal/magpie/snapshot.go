@@ -1,7 +1,5 @@
 package magpie
 
-import "strings"
-
 type Snapshot struct {
 	Name string `json:"name"`
 	Root string `json:"root"`
@@ -15,9 +13,9 @@ func (s *Store) CreateSnapshot(ctx Context, name string) (Snapshot, error) {
 	if err := EnsurePermission(st, ctx, PermissionSnapshot); err != nil {
 		return Snapshot{}, err
 	}
-	name = strings.TrimSpace(name)
-	if name == "" || strings.Contains(name, "..") || strings.ContainsAny(name, `/\`) {
-		return Snapshot{}, appErr(ErrValidation, "snapshot name must be a simple file-safe name")
+	name, err = canonicalSnapshotRef(name)
+	if err != nil {
+		return Snapshot{}, err
 	}
 	if st.Root == "" {
 		return Snapshot{}, appErr(ErrValidation, "cannot snapshot an empty store")

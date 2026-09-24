@@ -24,8 +24,8 @@ type (
 const (
 	ActorOwner = "owner"
 
-	AccountAsset    = intern.AccountAsset
-	AccountRevenue  = intern.AccountRevenue
+	AccountAsset     = intern.AccountAsset
+	AccountRevenue   = intern.AccountRevenue
 	AccountLiability = intern.AccountLiability
 
 	AccountRoleOperatingCash         = intern.AccountRoleOperatingCash
@@ -49,4 +49,25 @@ func OpenRemoteStore(jaybaseURL, token string) (*Store, error) {
 
 func EnsurePermission(st State, ctx Context, permission Permission) error {
 	return intern.EnsurePermission(st, ctx, permission)
+}
+
+type CatalogEntry = intern.CatalogEntry
+
+const (
+	EventNamespace              = intern.EventNamespace
+	RefPattern                  = intern.RefPattern
+	LegacyPeriodCloseRefPattern = intern.LegacyPeriodCloseRefPattern
+)
+
+// WriterCatalog is the exact type and command list a host installs for new
+// Magpie writes. Every type is in EventNamespace, so one allow.types pattern
+// ("magpie.*") covers them. Magpie does not install the catalog.
+func WriterCatalog() []CatalogEntry {
+	return intern.WriterCatalog()
+}
+
+// LegacyTypeAliases maps historical event types to the current catalog type.
+// Replay reads the keys. New appends use the values.
+func LegacyTypeAliases() map[string]string {
+	return intern.LegacyTypeAliases()
 }

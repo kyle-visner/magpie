@@ -1014,7 +1014,7 @@ Commands:
   note put --title TITLE --body BODY
   note get --id ID
   note list
-  snapshot create --name NAME
+  snapshot create --name NAME   (stored ref is magpie-NAME unless NAME already starts with magpie-)
   period close preview --through YYYY-MM-DD
   period close complete --through YYYY-MM-DD
   period reopen --through YYYY-MM-DD --reason REASON

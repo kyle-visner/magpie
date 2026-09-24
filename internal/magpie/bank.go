@@ -107,7 +107,7 @@ func (s *Store) ImportBankStatement(ctx Context, statement BankStatement) (BankS
 	statement.Status = ReconciliationOpen
 	statement.CreatedAt = s.now().UTC()
 	statement.CreatedBy = ctx.Actor
-	root, err = s.appendEventAt(ctx, "bank.statement", statement.ID, "bank statement import", wrapEvent("bank.statement.create", bankStatementPayload{Statement: statement}), root)
+	root, err = s.appendCatalogEvent(ctx, TypeBankStatement, statement.ID, CmdBankStatementImport, wrapEvent("bank.statement.create", bankStatementPayload{Statement: statement}), root)
 	return statement, root, err
 }
 
@@ -142,7 +142,7 @@ func (s *Store) ImportBankTransaction(ctx Context, transaction BankTransaction) 
 	transaction.UpdatedAt = now
 	transaction.CreatedBy = ctx.Actor
 	transaction.UpdatedBy = ctx.Actor
-	root, err := s.appendEventAt(ctx, "bank.transaction", transaction.ID, "bank transaction import", wrapEvent("bank.transaction.create", bankTransactionPayload{Transaction: transaction}), st.Root)
+	root, err := s.appendCatalogEvent(ctx, TypeBankTransaction, transaction.ID, CmdBankTransactionImport, wrapEvent("bank.transaction.create", bankTransactionPayload{Transaction: transaction}), st.Root)
 	return transaction, root, err
 }
 
@@ -204,7 +204,7 @@ func (s *Store) PostBankTransaction(ctx Context, transactionID, classificationAc
 	transaction.ReversalReason = ""
 	transaction.UpdatedAt = s.now().UTC()
 	transaction.UpdatedBy = ctx.Actor
-	root, err = s.appendEventAt(ctx, "bank.transaction", transaction.ID, "bank transaction post", wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: transaction}), root)
+	root, err = s.appendCatalogEvent(ctx, TypeBankTransaction, transaction.ID, CmdBankTransactionPost, wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: transaction}), root)
 	return transaction, root, err
 }
 
@@ -289,7 +289,7 @@ func (s *Store) ReverseBankTransaction(ctx Context, transactionID, reason, date 
 	})
 	transaction.UpdatedAt = s.now().UTC()
 	transaction.UpdatedBy = ctx.Actor
-	root, err = s.appendEventAt(ctx, "bank.transaction", transaction.ID, "bank transaction reverse", wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: transaction}), root)
+	root, err = s.appendCatalogEvent(ctx, TypeBankTransaction, transaction.ID, CmdBankTransactionReverse, wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: transaction}), root)
 	return transaction, root, err
 }
 
@@ -376,7 +376,7 @@ func (s *Store) ReclassifyBankTransaction(ctx Context, transactionID, accountID,
 	transaction.ActiveJournalEntryIDs = appendUniqueString(transaction.ActiveJournalEntryIDs, entry.ID)
 	transaction.UpdatedAt = s.now().UTC()
 	transaction.UpdatedBy = ctx.Actor
-	root, err = s.appendEventAt(ctx, "bank.transaction", transaction.ID, "bank transaction reclassify", wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: transaction}), root)
+	root, err = s.appendCatalogEvent(ctx, TypeBankTransaction, transaction.ID, CmdBankTransactionReclassify, wrapEvent("bank.transaction.update", bankTransactionPayload{Transaction: transaction}), root)
 	return transaction, root, err
 }
 
@@ -529,7 +529,7 @@ func (s *Store) PairBankTransfer(ctx Context, firstID, secondID string) ([]BankT
 	})
 	second.UpdatedAt = s.now().UTC()
 	second.UpdatedBy = ctx.Actor
-	root, err = s.appendEventAt(ctx, "bank.transaction", ids[0]+":"+ids[1], "bank transfer pair", wrapEvent("bank.transfer.pair", bankTransferPairPayload{From: first, To: second}), root)
+	root, err = s.appendCatalogEvent(ctx, TypeBankTransaction, ids[0]+":"+ids[1], CmdBankTransferPair, wrapEvent("bank.transfer.pair", bankTransferPairPayload{From: first, To: second}), root)
 	return []BankTransaction{first, second}, root, err
 }
 
@@ -646,7 +646,7 @@ func (s *Store) ReverseBankTransfer(ctx Context, firstID, secondID, reason, date
 	}
 	ids := []string{first.ID, second.ID}
 	sort.Strings(ids)
-	root, err = s.appendEventAt(ctx, "bank.transaction", ids[0]+":"+ids[1], "bank transfer reverse", wrapEvent("bank.transfer.reverse", bankTransferPairPayload{From: first, To: second}), root)
+	root, err = s.appendCatalogEvent(ctx, TypeBankTransaction, ids[0]+":"+ids[1], CmdBankTransferReverse, wrapEvent("bank.transfer.reverse", bankTransferPairPayload{From: first, To: second}), root)
 	return []BankTransaction{first, second}, root, err
 }
 
@@ -683,7 +683,7 @@ func (s *Store) CompleteBankReconciliation(ctx Context, statementID string) (Rec
 	statement.Status = ReconciliationCompleted
 	statement.CompletedAt = s.now().UTC()
 	statement.CompletedBy = ctx.Actor
-	root, err := s.appendEventAt(ctx, "bank.statement", statement.ID, "bank reconciliation complete", wrapEvent("bank.statement.update", bankStatementPayload{Statement: statement}), st.Root)
+	root, err := s.appendCatalogEvent(ctx, TypeBankStatement, statement.ID, CmdBankReconciliationComplete, wrapEvent("bank.statement.update", bankStatementPayload{Statement: statement}), st.Root)
 	if err != nil {
 		return ReconciliationReport{}, "", err
 	}

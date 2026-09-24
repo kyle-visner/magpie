@@ -32,7 +32,7 @@ type initRaceBackend struct {
 }
 
 func (b *initRaceBackend) AppendAt(ctx jaybase.Context, options jaybase.AppendOptions, expectedRoot string) (string, error) {
-	if options.Type != "store.init" || b.attempts >= b.conflicts {
+	if options.Type != TypeStoreInit || b.attempts >= b.conflicts {
 		return b.storageBackend.AppendAt(ctx, options, expectedRoot)
 	}
 	b.attempts++
@@ -270,7 +270,7 @@ func TestBookAccountingBasisIsExplicitVersionedAndEnforced(t *testing.T) {
 	}
 	var sawSettingsUpdate bool
 	for _, node := range nodes {
-		if node.Type == "book.settings" && node.Command == "book settings set" {
+		if node.Type == TypeBookSettings && node.Command == CmdBookSettingsSet {
 			sawSettingsUpdate = true
 			break
 		}
@@ -385,7 +385,7 @@ func TestAccountRolesAreTypedUniqueAndUpdatable(t *testing.T) {
 	}
 	var sawRoleUpdate bool
 	for _, node := range nodes {
-		if node.Type == "ledger.account" && node.Command == "ledger account role set" {
+		if node.Type == TypeLedgerAccount && node.Command == CmdLedgerAccountRoleSet {
 			sawRoleUpdate = true
 			break
 		}
@@ -1612,7 +1612,7 @@ func TestAccountNumbersAreStructuredUniqueAndUpdatable(t *testing.T) {
 	}
 	var sawUpdate bool
 	for _, node := range nodes {
-		if node.Type == "ledger.account" && node.Command == "ledger account number set" {
+		if node.Type == TypeLedgerAccount && node.Command == CmdLedgerAccountNumberSet {
 			sawUpdate = true
 			break
 		}
@@ -1685,7 +1685,7 @@ func TestAccountExternalRefCanBeAddedAndUpdatedAfterCreation(t *testing.T) {
 	}
 	var sawUpdate bool
 	for _, node := range nodes {
-		if node.Type == "ledger.account" && node.Command == "ledger account external-ref set" {
+		if node.Type == TypeLedgerAccount && node.Command == CmdLedgerAccountExternalRef {
 			sawUpdate = true
 			break
 		}
@@ -2045,7 +2045,7 @@ func TestSharedHistoryInitializationIsDomainAwareAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nodes) != 2 || nodes[0].Hash != foreignRoot || nodes[1].Type != "store.init" {
+	if len(nodes) != 2 || nodes[0].Hash != foreignRoot || nodes[1].Type != TypeStoreInit {
 		t.Fatalf("initialization replaced or reordered foreign history: %#v", nodes)
 	}
 }
@@ -2165,6 +2165,8 @@ func TestSharedHistoryStillFailsClosedForMagpieAndUnknownLegacyEvents(t *testing
 		{name: "unknown Magpie event kind", typ: "note", payload: wrapEvent("note.deleted", map[string]any{"id": "note:1"})},
 		{name: "unknown unnamespaced legacy event", typ: "mystery", payload: map[string]any{"kind": "opaque"}},
 		{name: "unknown Magpie-namespaced type", typ: "book.unknown", payload: map[string]any{"kind": "opaque"}},
+		{name: "unknown type in the magpie namespace", typ: "magpie.not-real", payload: map[string]any{"kind": "opaque"}},
+		{name: "unknown type in the historical customer namespace", typ: "customer.extra", payload: map[string]any{"kind": "opaque"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2194,7 +2196,7 @@ func TestSnapshotsArePermissionedNamedRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap.Root == "" || snap.Name != "fy2026-close" {
+	if snap.Root == "" || snap.Name != "magpie-fy2026-close" {
 		t.Fatalf("unexpected snapshot: %#v", snap)
 	}
 	_, updatedRoot, err := s.UpsertNote(owner, "", "Close note", "updated after first snapshot", "internal")
@@ -2208,7 +2210,7 @@ func TestSnapshotsArePermissionedNamedRoots(t *testing.T) {
 	if updated.Root != updatedRoot || updated.Root == snap.Root {
 		t.Fatalf("local named ref did not update conditionally: first=%q updated=%q", snap.Root, updated.Root)
 	}
-	if err := storageError(s.db.WriteNamedRefAt("fy2026-close", snap.Root, "")); err == nil {
+	if err := storageError(s.db.WriteNamedRefAt(snap.Name, snap.Root, "")); err == nil {
 		t.Fatal("expected stale local named-ref update to conflict")
 	} else {
 		var app *AppError

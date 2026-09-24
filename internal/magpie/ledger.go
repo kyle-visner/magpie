@@ -106,7 +106,7 @@ func (s *Store) CreateAccountWithDetails(ctx Context, account Account) (Account,
 	}
 	now := s.now().UTC()
 	acct := Account{ID: id, Number: number, Name: account.Name, Type: account.Type, Role: role, Sensitivity: account.Sensitivity, ExternalRefs: externalRefs, CreatedAt: now, CreatedBy: ctx.Actor}
-	hash, err := s.appendEventAt(ctx, "ledger.account", id, "ledger account create", wrapEvent("account.create", accountCreatePayload{Account: acct}), st.Root)
+	hash, err := s.appendCatalogEvent(ctx, TypeLedgerAccount, id, CmdLedgerAccountCreate, wrapEvent("account.create", accountCreatePayload{Account: acct}), st.Root)
 	return acct, hash, err
 }
 
@@ -137,7 +137,7 @@ func (s *Store) SetAccountNumber(ctx Context, accountID string, number string) (
 		return Account{}, "", err
 	}
 	account.Number = normalized
-	hash, err := s.appendEventAt(ctx, "ledger.account", account.ID, "ledger account number set", wrapEvent("account.update", accountUpdatePayload{Account: account}), st.Root)
+	hash, err := s.appendCatalogEvent(ctx, TypeLedgerAccount, account.ID, CmdLedgerAccountNumberSet, wrapEvent("account.update", accountUpdatePayload{Account: account}), st.Root)
 	return account, hash, err
 }
 
@@ -174,7 +174,7 @@ func (s *Store) SetAccountRole(ctx Context, accountID string, role AccountRole) 
 		return Account{}, "", err
 	}
 	account.Role = normalized
-	hash, err := s.appendEventAt(ctx, "ledger.account", account.ID, "ledger account role set", wrapEvent("account.update", accountUpdatePayload{Account: account}), st.Root)
+	hash, err := s.appendCatalogEvent(ctx, TypeLedgerAccount, account.ID, CmdLedgerAccountRoleSet, wrapEvent("account.update", accountUpdatePayload{Account: account}), st.Root)
 	return account, hash, err
 }
 
@@ -251,7 +251,7 @@ func (s *Store) setAccountExternalRef(ctx Context, accountID string, ref Externa
 		refs = append(refs, normalized)
 	}
 	account.ExternalRefs = refs
-	hash, err := s.appendEventAt(ctx, "ledger.account", account.ID, "ledger account external-ref set", wrapEvent("account.update", accountUpdatePayload{Account: account}), st.Root)
+	hash, err := s.appendCatalogEvent(ctx, TypeLedgerAccount, account.ID, CmdLedgerAccountExternalRef, wrapEvent("account.update", accountUpdatePayload{Account: account}), st.Root)
 	return account, hash, err
 }
 
@@ -559,7 +559,7 @@ func (s *Store) createWorkflowJournalEntry(ctx Context, req workflowJournalReque
 	}
 	entry.CreatedAt = s.now().UTC()
 	entry.CreatedBy = ctx.Actor
-	hash, err := s.appendJournalEntry(ctx, st, entry, sourceKey, "workflow journal create")
+	hash, err := s.appendJournalEntry(ctx, st, entry, sourceKey, CmdWorkflowJournalCreate)
 	return entry, hash, err
 }
 
@@ -669,18 +669,18 @@ func (s *Store) createJournalEntry(ctx Context, entry JournalEntry, sourceKey st
 	entry.GeneratedBy = ctx.Actor
 	entry.CreatedAt = s.now().UTC()
 	entry.CreatedBy = ctx.Actor
-	hash, err := s.appendJournalEntry(ctx, st, entry, sourceKey, "ledger journal create")
+	hash, err := s.appendJournalEntry(ctx, st, entry, sourceKey, CmdLedgerJournalCreate)
 	return entry, hash, err
 }
 
 // appendJournalEntry is the single production choke point for all dated
 // postings. Domain workflows and privileged manual journals must both pass
-// through it before a ledger.journal event can be appended.
+// through it before a magpie.ledger.journal event can be appended.
 func (s *Store) appendJournalEntry(ctx Context, st State, entry JournalEntry, sourceKey, command string) (string, error) {
 	if err := ensurePostingDateOpen(st, entry.Date); err != nil {
 		return "", err
 	}
-	return s.appendEventAt(ctx, "ledger.journal", entry.ID, command, wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), st.Root)
+	return s.appendCatalogEvent(ctx, TypeLedgerJournal, entry.ID, command, wrapEvent("journal.create", journalCreatePayload{Entry: entry, SourceKey: sourceKey}), st.Root)
 }
 
 func sourceKeyForEntry(entry JournalEntry) string {
