@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"magpie/internal/magpie"
+	"github.com/kyle-visner/magpie/internal/magpie"
 )
 
 func TestMCPInitializeListsToolsAndPostsThroughBook(t *testing.T) {

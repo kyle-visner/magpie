@@ -1,4 +1,4 @@
-module magpie
+module github.com/kyle-visner/magpie
 
 go 1.26.6
 
