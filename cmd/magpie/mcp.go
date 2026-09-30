@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"magpie/internal/magpie"
+	"github.com/kyle-visner/magpie/internal/magpie"
 )
 
 const (

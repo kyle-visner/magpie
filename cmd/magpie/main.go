@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"magpie/internal/magpie"
+	"github.com/kyle-visner/magpie/internal/magpie"
 )
 
 type app struct {

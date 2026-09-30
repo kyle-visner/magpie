@@ -1,6 +1,6 @@
 package magpie
 
-import intern "magpie/internal/magpie"
+import intern "github.com/kyle-visner/magpie/internal/magpie"
 
 // Public aliases for the host and other AGPL integrators. The domain engine
 // stays in internal/magpie; this file is the supported import surface.
@@ -19,6 +19,10 @@ type (
 	AccountingBasis       = intern.AccountingBasis
 	State                 = intern.State
 	Permission            = intern.Permission
+	Book                  = intern.Book
+	Tool                  = intern.Tool
+	AppError              = intern.AppError
+	ErrorCode             = intern.ErrorCode
 )
 
 const (
@@ -45,6 +49,28 @@ func OpenStore(dir string) (*Store, error) {
 
 func OpenRemoteStore(jaybaseURL, token string) (*Store, error) {
 	return intern.OpenRemoteStore(jaybaseURL, token)
+}
+
+// NewBook binds a store to the acting identity. A host that serves Magpie as
+// MCP tools calls Book.Invoke with the tool name and its JSON arguments, the
+// same path the magpie mcp command uses.
+func NewBook(store *Store, ctx Context) *Book {
+	return intern.NewBook(store, ctx)
+}
+
+// ToolCatalog lists every Book operation as an MCP tool, including init.
+func ToolCatalog() []Tool {
+	return intern.ToolCatalog()
+}
+
+// KnownTool reports whether name is in ToolCatalog.
+func KnownTool(name string) bool {
+	return intern.KnownTool(name)
+}
+
+// EncodeJSON renders a tool result the way the CLI and MCP server do.
+func EncodeJSON(v any) ([]byte, error) {
+	return intern.EncodeJSON(v)
 }
 
 func EnsurePermission(st State, ctx Context, permission Permission) error {
